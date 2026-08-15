@@ -21,15 +21,6 @@ PORT = int(os.getenv("PORT", "8000"))
 DB_PATH = Path(os.getenv("DB_PATH", "links.sqlite3"))
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
-# Определяем текущий сервис по домену
-SERVICE_TYPE = "tiktok"  # по умолчанию
-if "telegra-ph" in PUBLIC_BASE_URL or "telegraph" in PUBLIC_BASE_URL:
-    SERVICE_TYPE = "telegraph"
-elif "youtube" in PUBLIC_BASE_URL or "shorts" in PUBLIC_BASE_URL:
-    SERVICE_TYPE = "youtube"
-elif "tiktok" in PUBLIC_BASE_URL or "vt-tiktok" in PUBLIC_BASE_URL:
-    SERVICE_TYPE = "tiktok"
-
 # Инициализация бота
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -241,6 +232,9 @@ user_data = {}
 async def handle_telegraph_input(message: Message):
     chat_id = message.chat.id
     if chat_id not in user_data:
+        # Проверяем нажатие кнопки "Создать новую ссылку"
+        if message.text == "🔗 Создать новую ссылку":
+            await message.answer("Выберите оформление новой ссылки:", reply_markup=service_keyboard())
         return
     
     state = user_data[chat_id]
@@ -283,11 +277,6 @@ async def handle_telegraph_input(message: Message):
             disable_web_page_preview=False,
         )
         return
-
-
-@router.message(F.text == "🔗 Создать новую ссылку")
-async def new_link(message: Message):
-    await message.answer("Выберите оформление новой ссылки:", reply_markup=service_keyboard())
 
 
 def generate_tiktok_page(token: str) -> str:
