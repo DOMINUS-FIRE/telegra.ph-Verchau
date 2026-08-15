@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: camera-link-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
