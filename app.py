@@ -1,21 +1,21 @@
-import asyncio
 import hashlib
 import html
 import json
 import os
 import secrets
 import sqlite3
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 import httpx
-import uvicorn
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
-    KeyboardButton,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     Message,
-    ReplyKeyboardMarkup,
     Update,
 )
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -31,17 +31,26 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 
 PORT = int(os.getenv("PORT", "8000"))
-DB_PATH = Path(os.getenv("DB_PATH", "links.sqlite3"))
+
+DB_PATH = Path(
+    os.getenv(
+        "DB_PATH",
+        "links.sqlite3",
+    )
+)
+
 APP_DIR = Path(__file__).resolve().parent
 
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
 
 # ============================================================
-# WEBHOOK
+# WEBHOOK CONFIG
 # ============================================================
 
-_token_hash = hashlib.sha256(BOT_TOKEN.encode("utf-8")).hexdigest()
+_token_hash = hashlib.sha256(
+    BOT_TOKEN.encode("utf-8")
+).hexdigest()
 
 WEBHOOK_PATH_KEY = os.getenv(
     "WEBHOOK_PATH_KEY",
@@ -53,35 +62,32 @@ WEBHOOK_SECRET = os.getenv(
     _token_hash[32:64],
 )
 
-WEBHOOK_PATH = f"/telegram-webhook/{WEBHOOK_PATH_KEY}"
-WEBHOOK_URL = f"{PUBLIC_BASE_URL}{WEBHOOK_PATH}"
+WEBHOOK_PATH = (
+    f"/telegram-webhook/"
+    f"{WEBHOOK_PATH_KEY}"
+)
+
+WEBHOOK_URL = (
+    f"{PUBLIC_BASE_URL}"
+    f"{WEBHOOK_PATH}"
+)
 
 
 # ============================================================
-# TELEGRAM / FASTAPI
+# TELEGRAM
 # ============================================================
 
 bot = Bot(BOT_TOKEN)
 
 dp = Dispatcher()
+
 router = Router()
 
 dp.include_router(router)
 
-app = FastAPI(
-    docs_url=None,
-    redoc_url=None,
-)
-
-app.mount(
-    "/static",
-    StaticFiles(directory=str(APP_DIR)),
-    name="static",
-)
-
 
 # ============================================================
-# CONSTANTS
+# SERVICES
 # ============================================================
 
 SERVICES = {
@@ -89,41 +95,37 @@ SERVICES = {
         "name": "TikTok",
         "emoji": "🎵",
         "prefix": "tt",
+        "path": "tiktok",
     },
+
     "youtube": {
         "name": "YouTube Shorts",
         "emoji": "📺",
         "prefix": "yt",
+        "path": "youtube",
     },
+
     "telegraph": {
         "name": "Telegraph",
         "emoji": "📝",
         "prefix": "tg",
+        "path": "telegraph",
     },
 }
 
+
 PREFIX_TO_SERVICE = {
-    data["prefix"]: key
-    for key, data in SERVICES.items()
+    value["prefix"]: key
+    for key, value in SERVICES.items()
 }
 
 
-NEW_LINK_TEXT = "🔗 Создать новую ссылку"
-
-TIKTOK_TEXT = "🎵 TikTok"
-YOUTUBE_TEXT = "📺 YouTube"
-TELEGRAPH_TEXT = "📝 Telegraph"
-
-SKIP_TEXT = "⏭ Пропустить"
-
-PHOTO_YES = "✅ Да"
-PHOTO_NO = "❌ Нет"
-
-
-DEFAULT_TELEGRAPH_TITLE = "Новая статья"
+DEFAULT_TELEGRAPH_TITLE = (
+    "Статья Telegraph"
+)
 
 DEFAULT_TELEGRAPH_CONTENT = (
-    "Это стандартный текст статьи."
+    "Это пример статьи, созданной через бота."
 )
 
 
@@ -138,25 +140,32 @@ def db_connect():
     )
 
 
-def db_init():
+def db_init() -> None:
+
     DB_PATH.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
+
+        # ----------------------------------------------------
+        # LINKS
+        # ----------------------------------------------------
 
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS links (
                 token TEXT PRIMARY KEY,
                 owner_chat_id INTEGER NOT NULL,
-                service TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                service TEXT NOT NULL DEFAULT 'tiktok',
                 title TEXT DEFAULT '',
                 content TEXT DEFAULT '',
-                show_photo INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                show_photo INTEGER NOT NULL DEFAULT 1
             )
             """
         )
@@ -169,6 +178,7 @@ def db_init():
         }
 
         if "service" not in columns:
+
             con.execute(
                 """
                 ALTER TABLE links
@@ -178,22 +188,27 @@ def db_init():
             )
 
         if "title" not in columns:
+
             con.execute(
                 """
                 ALTER TABLE links
-                ADD COLUMN title TEXT DEFAULT ''
+                ADD COLUMN title TEXT
+                DEFAULT ''
                 """
             )
 
         if "content" not in columns:
+
             con.execute(
                 """
                 ALTER TABLE links
-                ADD COLUMN content TEXT DEFAULT ''
+                ADD COLUMN content TEXT
+                DEFAULT ''
                 """
             )
 
         if "show_photo" not in columns:
+
             con.execute(
                 """
                 ALTER TABLE links
@@ -201,6 +216,10 @@ def db_init():
                 NOT NULL DEFAULT 1
                 """
             )
+
+        # ----------------------------------------------------
+        # TELEGRAPH DRAFT
+        # ----------------------------------------------------
 
         con.execute(
             """
@@ -213,6 +232,10 @@ def db_init():
             )
             """
         )
+
+        # ----------------------------------------------------
+        # PROCESSED TELEGRAM UPDATES
+        # ----------------------------------------------------
 
         con.execute(
             """
@@ -230,14 +253,16 @@ def db_init():
 # TELEGRAPH DRAFT
 # ============================================================
 
-def set_draft(
+def set_telegraph_draft(
     chat_id: int,
     step: str,
     title: str = "",
     content: str = "",
-):
+) -> None:
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         con.execute(
             """
@@ -268,9 +293,13 @@ def set_draft(
         con.commit()
 
 
-def get_draft(chat_id: int):
+def get_telegraph_draft(
+    chat_id: int
+):
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         return con.execute(
             """
@@ -283,34 +312,46 @@ def get_draft(chat_id: int):
 
             WHERE chat_id = ?
             """,
-            (chat_id,),
+            (
+                chat_id,
+            ),
         ).fetchone()
 
 
-def clear_draft(chat_id: int):
+def clear_telegraph_draft(
+    chat_id: int
+) -> None:
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         con.execute(
             """
             DELETE FROM telegraph_drafts
             WHERE chat_id = ?
             """,
-            (chat_id,),
+            (
+                chat_id,
+            ),
         )
 
         con.commit()
 
 
 # ============================================================
-# UPDATE DEDUPLICATION
+# TELEGRAM UPDATE DEDUPLICATION
 # ============================================================
 
-def claim_update(update_id: int):
+def claim_update(
+    update_id: int
+) -> bool:
 
     try:
 
-        with closing(db_connect()) as con:
+        with closing(
+            db_connect()
+        ) as con:
 
             con.execute(
                 """
@@ -319,8 +360,12 @@ def claim_update(update_id: int):
                 )
                 VALUES (?)
                 """,
-                (update_id,),
+                (
+                    update_id,
+                ),
             )
+
+            # Не раздуваем таблицу бесконечно.
 
             con.execute(
                 """
@@ -329,8 +374,8 @@ def claim_update(update_id: int):
                 """,
                 (
                     max(
-                        update_id - 5000,
                         0,
+                        update_id - 5000,
                     ),
                 ),
             )
@@ -340,19 +385,26 @@ def claim_update(update_id: int):
         return True
 
     except sqlite3.IntegrityError:
+
         return False
 
 
-def release_update(update_id: int):
+def release_update(
+    update_id: int
+) -> None:
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         con.execute(
             """
             DELETE FROM processed_updates
             WHERE update_id = ?
             """,
-            (update_id,),
+            (
+                update_id,
+            ),
         )
 
         con.commit()
@@ -368,16 +420,35 @@ def create_link(
     title: str = "",
     content: str = "",
     show_photo: bool = True,
-):
+) -> str:
 
     if service not in SERVICES:
+
         raise ValueError(
             f"Unknown service: {service}"
         )
 
-    prefix = SERVICES[service]["prefix"]
+    prefix = (
+        SERVICES[service]["prefix"]
+    )
 
     while True:
+
+        # ----------------------------------------------------
+        # ВАЖНО:
+        #
+        # TikTok:
+        # tt_xxxxx
+        #
+        # YouTube:
+        # yt_xxxxx
+        #
+        # Telegraph:
+        # tg_xxxxx
+        #
+        # Поэтому сервис уже зашит
+        # непосредственно в token.
+        # ----------------------------------------------------
 
         token = (
             f"{prefix}_"
@@ -386,20 +457,30 @@ def create_link(
 
         try:
 
-            with closing(db_connect()) as con:
+            with closing(
+                db_connect()
+            ) as con:
 
                 con.execute(
                     """
                     INSERT INTO links (
                         token,
                         owner_chat_id,
-                        service,
                         used,
+                        service,
                         title,
                         content,
                         show_photo
                     )
-                    VALUES (?, ?, ?, 0, ?, ?, ?)
+                    VALUES (
+                        ?,
+                        ?,
+                        0,
+                        ?,
+                        ?,
+                        ?,
+                        ?
+                    )
                     """,
                     (
                         token,
@@ -407,7 +488,7 @@ def create_link(
                         service,
                         title,
                         content,
-                        int(show_photo),
+                        1 if show_photo else 0,
                     ),
                 )
 
@@ -416,12 +497,17 @@ def create_link(
             return token
 
         except sqlite3.IntegrityError:
-            pass
+
+            continue
 
 
-def get_link(token: str):
+def get_link(
+    token: str
+):
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         return con.execute(
             """
@@ -437,7 +523,9 @@ def get_link(token: str):
 
             WHERE token = ?
             """,
-            (token,),
+            (
+                token,
+            ),
         ).fetchone()
 
 
@@ -446,33 +534,48 @@ def resolve_link(
     expected_service: str,
 ):
 
-    expected_prefix = (
-        SERVICES[expected_service]["prefix"]
-    )
+    if expected_service not in SERVICES:
+        return None
 
     # --------------------------------------------------------
-    # Проверяем prefix токена.
-    # tt_ не сможет открыться через YouTube.
-    # yt_ не сможет открыться через Telegraph.
-    # tg_ не сможет открыться через TikTok.
+    # Для новых ссылок сначала смотрим prefix.
+    #
+    # tt_ НЕ МОЖЕТ открыться как YouTube/Telegraph.
+    # yt_ НЕ МОЖЕТ открыться как TikTok/Telegraph.
+    # tg_ НЕ МОЖЕТ открыться как TikTok/YouTube.
     # --------------------------------------------------------
 
     if "_" in identifier:
 
-        token_prefix = identifier.split(
+        prefix = identifier.split(
             "_",
             1,
         )[0]
 
+        encoded_service = (
+            PREFIX_TO_SERVICE.get(
+                prefix
+            )
+        )
+
         if (
-            token_prefix in PREFIX_TO_SERVICE
-            and token_prefix != expected_prefix
+            encoded_service is not None
+            and
+            encoded_service
+            != expected_service
         ):
+
             return None
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
-        row = con.execute(
+        # ----------------------------------------------------
+        # EXACT TOKEN
+        # ----------------------------------------------------
+
+        exact = con.execute(
             """
             SELECT
                 token,
@@ -494,68 +597,86 @@ def resolve_link(
             ),
         ).fetchone()
 
-        if row:
-            return row
+        if exact:
 
-        # Старые ссылки, где использовалось
-        # только 8 символов token.
+            return exact
 
-        if len(identifier) != 8:
-            return None
+        # ----------------------------------------------------
+        # Старые ссылки из предыдущих версий.
+        #
+        # Только если identifier = 8 символов.
+        # И только внутри НУЖНОГО service.
+        # ----------------------------------------------------
 
-        rows = con.execute(
-            """
-            SELECT
-                token,
-                owner_chat_id,
-                used,
-                service,
-                title,
-                content,
-                show_photo
+        if len(identifier) == 8:
 
-            FROM links
+            rows = con.execute(
+                """
+                SELECT
+                    token,
+                    owner_chat_id,
+                    used,
+                    service,
+                    title,
+                    content,
+                    show_photo
 
-            WHERE token LIKE ?
-              AND service = ?
+                FROM links
 
-            LIMIT 2
-            """,
-            (
-                f"{identifier}%",
-                expected_service,
-            ),
-        ).fetchall()
+                WHERE token LIKE ?
+                  AND service = ?
 
-        if len(rows) == 1:
-            return rows[0]
+                LIMIT 2
+                """,
+                (
+                    f"{identifier}%",
+                    expected_service,
+                ),
+            ).fetchall()
 
-        return None
+            if len(rows) == 1:
+
+                return rows[0]
+
+    return None
 
 
-def claim_link(token: str):
+def claim_link(
+    token: str
+) -> bool:
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         cursor = con.execute(
             """
             UPDATE links
+
             SET used = 2
 
             WHERE token = ?
               AND used = 0
             """,
-            (token,),
+            (
+                token,
+            ),
         )
 
         con.commit()
 
-        return cursor.rowcount == 1
+        return (
+            cursor.rowcount == 1
+        )
 
 
-def finish_link(token: str):
+def finish_link(
+    token: str
+) -> None:
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         con.execute(
             """
@@ -563,15 +684,21 @@ def finish_link(token: str):
             SET used = 1
             WHERE token = ?
             """,
-            (token,),
+            (
+                token,
+            ),
         )
 
         con.commit()
 
 
-def release_link(token: str):
+def release_link(
+    token: str
+) -> None:
 
-    with closing(db_connect()) as con:
+    with closing(
+        db_connect()
+    ) as con:
 
         con.execute(
             """
@@ -581,400 +708,658 @@ def release_link(token: str):
             WHERE token = ?
               AND used = 2
             """,
-            (token,),
+            (
+                token,
+            ),
         )
 
         con.commit()
 
 
 # ============================================================
-# URL GENERATION
+# PUBLIC URL
 # ============================================================
 
+def service_from_token(
+    token: str
+) -> str:
+
+    prefix = token.split(
+        "_",
+        1,
+    )[0]
+
+    service = (
+        PREFIX_TO_SERVICE.get(
+            prefix
+        )
+    )
+
+    if not service:
+
+        raise ValueError(
+            f"Unknown token prefix: {prefix}"
+        )
+
+    return service
+
+
 def public_link(
-    service: str,
-    token: str,
-):
+    token: str
+) -> str:
 
-    if service == "tiktok":
-        return (
-            f"{PUBLIC_BASE_URL}"
-            f"/@{token}"
+    # --------------------------------------------------------
+    # Сервис определяется по TOKEN,
+    # а не по состоянию Telegram.
+    #
+    # Поэтому невозможно создать
+    # yt_ token и случайно получить
+    # Telegraph URL.
+    # --------------------------------------------------------
+
+    service = (
+        service_from_token(
+            token
         )
+    )
 
-    if service == "youtube":
-        return (
-            f"{PUBLIC_BASE_URL}"
-            f"/shorts/{token}"
-        )
+    path = (
+        SERVICES[service]["path"]
+    )
 
-    if service == "telegraph":
-        return (
-            f"{PUBLIC_BASE_URL}"
-            f"/article/{token}"
-        )
-
-    raise ValueError(
-        f"Unknown service: {service}"
+    return (
+        f"{PUBLIC_BASE_URL}"
+        f"/{path}"
+        f"/{token}"
     )
 
 
 # ============================================================
-# KEYBOARDS
+# INLINE KEYBOARDS
 # ============================================================
 
 def service_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎵 TikTok",
+                    callback_data=(
+                        "service:tiktok"
+                    ),
+                )
+            ],
 
-    return ReplyKeyboardMarkup(
-        keyboard=[
             [
-                KeyboardButton(
-                    text=TIKTOK_TEXT
+                InlineKeyboardButton(
+                    text="📺 YouTube Shorts",
+                    callback_data=(
+                        "service:youtube"
+                    ),
                 )
             ],
+
             [
-                KeyboardButton(
-                    text=YOUTUBE_TEXT
+                InlineKeyboardButton(
+                    text="📝 Telegraph",
+                    callback_data=(
+                        "service:telegraph"
+                    ),
                 )
             ],
-            [
-                KeyboardButton(
-                    text=TELEGRAPH_TEXT
-                )
-            ],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
+        ]
     )
 
 
-def skip_keyboard():
-
-    return ReplyKeyboardMarkup(
-        keyboard=[
+def skip_title_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                KeyboardButton(
-                    text=SKIP_TEXT
+                InlineKeyboardButton(
+                    text="⏭ Пропустить",
+                    callback_data=(
+                        "tg:skip:title"
+                    ),
                 )
             ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
+        ]
     )
 
 
-def photo_keyboard():
-
-    return ReplyKeyboardMarkup(
-        keyboard=[
+def skip_content_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                KeyboardButton(
-                    text=PHOTO_YES
+                InlineKeyboardButton(
+                    text="⏭ Пропустить",
+                    callback_data=(
+                        "tg:skip:content"
+                    ),
+                )
+            ]
+        ]
+    )
+
+
+def photo_choice_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да",
+                    callback_data=(
+                        "tg:photo:yes"
+                    ),
                 ),
-                KeyboardButton(
-                    text=PHOTO_NO
+
+                InlineKeyboardButton(
+                    text="❌ Нет",
+                    callback_data=(
+                        "tg:photo:no"
+                    ),
                 ),
             ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
+        ]
     )
 
 
 def finished_keyboard():
-
-    return ReplyKeyboardMarkup(
-        keyboard=[
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                KeyboardButton(
-                    text=NEW_LINK_TEXT
+                InlineKeyboardButton(
+                    text=(
+                        "🔗 Создать новую ссылку"
+                    ),
+                    callback_data="new_link",
                 )
             ]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
+        ]
     )
 
 
 # ============================================================
-# TELEGRAM HELPERS
+# SEND GENERATED LINK
 # ============================================================
 
 async def send_created_link(
     message: Message,
-    service: str,
     token: str,
-):
+) -> None:
+
+    # --------------------------------------------------------
+    # ЕЩЁ ОДНА ЗАЩИТА.
+    #
+    # Тут service вообще не передаётся.
+    # Он определяется из prefix самого token.
+    # --------------------------------------------------------
+
+    service = (
+        service_from_token(
+            token
+        )
+    )
 
     info = SERVICES[service]
 
-    url = public_link(
-        service,
-        token,
-    )
+    url = public_link(token)
 
     await message.answer(
         (
             f"{info['emoji']} "
             f"Одноразовая ссылка создана:\n\n"
-            f"<a href=\"{html.escape(url, quote=True)}\">"
-            f"{html.escape(url)}"
-            f"</a>\n\n"
+
             f"Оформление: "
-            f"<b>{info['name']}</b>"
+            f"<b>"
+            f"{html.escape(info['name'])}"
+            f"</b>\n\n"
+
+            f"<a href=\""
+            f"{html.escape(url, quote=True)}"
+            f"\">"
+            f"{html.escape(url)}"
+            f"</a>"
         ),
+
         parse_mode="HTML",
+
+        # Не даём Telegram строить
+        # старую/закешированную preview-card.
         disable_web_page_preview=True,
-        reply_markup=finished_keyboard(),
+
+        reply_markup=(
+            finished_keyboard()
+        ),
     )
 
 
 # ============================================================
-# ONE TELEGRAM TEXT HANDLER
+# TELEGRAM — /start
 # ============================================================
 
-@router.message(F.text)
-async def handle_text(message: Message):
+@router.message(
+    CommandStart()
+)
+async def start(
+    message: Message
+):
+
+    clear_telegraph_draft(
+        message.chat.id
+    )
+
+    await message.answer(
+        (
+            "👋 Выберите "
+            "оформление страницы:"
+        ),
+        reply_markup=(
+            service_keyboard()
+        ),
+    )
+
+
+# ============================================================
+# TELEGRAM — /new
+# ============================================================
+
+@router.message(
+    Command("new")
+)
+async def new_command(
+    message: Message
+):
+
+    clear_telegraph_draft(
+        message.chat.id
+    )
+
+    await message.answer(
+        (
+            "Выберите оформление "
+            "новой ссылки:"
+        ),
+        reply_markup=(
+            service_keyboard()
+        ),
+    )
+
+
+# ============================================================
+# TELEGRAM — CREATE NEW LINK BUTTON
+# ============================================================
+
+@router.callback_query(
+    F.data == "new_link"
+)
+async def new_link_callback(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    chat_id = (
+        callback.message.chat.id
+    )
+
+    clear_telegraph_draft(
+        chat_id
+    )
+
+    await callback.message.answer(
+        (
+            "Выберите оформление "
+            "новой ссылки:"
+        ),
+        reply_markup=(
+            service_keyboard()
+        ),
+    )
+
+
+# ============================================================
+# TELEGRAM — SERVICE SELECTION
+# ============================================================
+
+@router.callback_query(
+    F.data.startswith(
+        "service:"
+    )
+)
+async def choose_service(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    service = (
+        callback.data.split(
+            ":",
+            1,
+        )[1]
+    )
+
+    if service not in SERVICES:
+        return
+
+    chat_id = (
+        callback.message.chat.id
+    )
+
+    clear_telegraph_draft(
+        chat_id
+    )
+
+    # --------------------------------------------------------
+    # TELEGRAPH
+    # --------------------------------------------------------
+
+    if service == "telegraph":
+
+        set_telegraph_draft(
+            chat_id,
+            "title",
+        )
+
+        await callback.message.answer(
+            (
+                "📝 Введите "
+                "заголовок статьи:"
+            ),
+            reply_markup=(
+                skip_title_keyboard()
+            ),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # TIKTOK / YOUTUBE
+    # --------------------------------------------------------
+
+    token = create_link(
+        owner_chat_id=chat_id,
+        service=service,
+    )
+
+    await send_created_link(
+        callback.message,
+        token,
+    )
+
+
+# ============================================================
+# TELEGRAPH — SKIP TITLE
+# ============================================================
+
+@router.callback_query(
+    F.data == "tg:skip:title"
+)
+async def skip_telegraph_title(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    chat_id = (
+        callback.message.chat.id
+    )
+
+    draft = (
+        get_telegraph_draft(
+            chat_id
+        )
+    )
+
+    if (
+        not draft
+        or draft[0] != "title"
+    ):
+        return
+
+    set_telegraph_draft(
+        chat_id,
+        "content",
+        title=(
+            DEFAULT_TELEGRAPH_TITLE
+        ),
+    )
+
+    await callback.message.answer(
+        "✍️ Введите текст статьи:",
+        reply_markup=(
+            skip_content_keyboard()
+        ),
+    )
+
+
+# ============================================================
+# TELEGRAPH — SKIP CONTENT
+# ============================================================
+
+@router.callback_query(
+    F.data == "tg:skip:content"
+)
+async def skip_telegraph_content(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    chat_id = (
+        callback.message.chat.id
+    )
+
+    draft = (
+        get_telegraph_draft(
+            chat_id
+        )
+    )
+
+    if (
+        not draft
+        or draft[0] != "content"
+    ):
+        return
+
+    _, title, _ = draft
+
+    set_telegraph_draft(
+        chat_id,
+        "photo",
+
+        title=(
+            title
+            or
+            DEFAULT_TELEGRAPH_TITLE
+        ),
+
+        content=(
+            DEFAULT_TELEGRAPH_CONTENT
+        ),
+    )
+
+    await callback.message.answer(
+        (
+            "🖼 Добавить photo.png "
+            "в статью?"
+        ),
+        reply_markup=(
+            photo_choice_keyboard()
+        ),
+    )
+
+
+# ============================================================
+# TELEGRAPH — PHOTO YES / NO
+# ============================================================
+
+@router.callback_query(
+    F.data.in_(
+        {
+            "tg:photo:yes",
+            "tg:photo:no",
+        }
+    )
+)
+async def telegraph_photo_choice(
+    callback: CallbackQuery
+):
+
+    await callback.answer()
+
+    chat_id = (
+        callback.message.chat.id
+    )
+
+    draft = (
+        get_telegraph_draft(
+            chat_id
+        )
+    )
+
+    if (
+        not draft
+        or draft[0] != "photo"
+    ):
+        return
+
+    _, title, content = draft
+
+    show_photo = (
+        callback.data
+        ==
+        "tg:photo:yes"
+    )
+
+    token = create_link(
+        owner_chat_id=chat_id,
+
+        service="telegraph",
+
+        title=(
+            title
+            or
+            DEFAULT_TELEGRAPH_TITLE
+        ),
+
+        content=(
+            content
+            or
+            DEFAULT_TELEGRAPH_CONTENT
+        ),
+
+        show_photo=show_photo,
+    )
+
+    clear_telegraph_draft(
+        chat_id
+    )
+
+    await send_created_link(
+        callback.message,
+        token,
+    )
+
+
+# ============================================================
+# TELEGRAPH — USER TEXT
+# ============================================================
+
+@router.message(
+    F.text
+)
+async def telegraph_text_input(
+    message: Message
+):
 
     chat_id = message.chat.id
+
+    draft = (
+        get_telegraph_draft(
+            chat_id
+        )
+    )
+
+    # Если Telegraph сейчас не создаётся,
+    # обычный текст игнорируем.
+    if not draft:
+        return
+
+    (
+        step,
+        saved_title,
+        saved_content,
+    ) = draft
 
     text = (
         message.text
         or ""
     ).strip()
 
-    lower = text.lower()
-
-    # ========================================================
-    # START
-    # ========================================================
-
-    if (
-        lower == "/start"
-        or lower.startswith("/start@")
-    ):
-
-        clear_draft(chat_id)
-
-        await message.answer(
-            "👋 Выберите оформление ссылки:",
-            reply_markup=service_keyboard(),
-        )
-
-        return
-
-    # ========================================================
-    # NEW LINK
-    # ========================================================
-
-    if (
-        lower == "/new"
-        or lower.startswith("/new@")
-        or text == NEW_LINK_TEXT
-    ):
-
-        clear_draft(chat_id)
-
-        await message.answer(
-            "Выберите оформление новой ссылки:",
-            reply_markup=service_keyboard(),
-        )
-
-        return
-
-    # ========================================================
-    # SERVICE SELECTION
-    # ========================================================
-
-    service_map = {
-        TIKTOK_TEXT: "tiktok",
-        YOUTUBE_TEXT: "youtube",
-
-        # совместимость со старой кнопкой
-        "📺 YouTube Shorts": "youtube",
-
-        TELEGRAPH_TEXT: "telegraph",
-    }
-
-    if text in service_map:
-
-        service = service_map[text]
-
-        clear_draft(chat_id)
-
-        # ----------------------------------------------------
-        # TELEGRAPH
-        # ----------------------------------------------------
-
-        if service == "telegraph":
-
-            set_draft(
-                chat_id,
-                "title",
-            )
-
-            await message.answer(
-                (
-                    "📝 Введите заголовок статьи.\n\n"
-                    "Если хотите оставить стандартный "
-                    "заголовок — нажмите "
-                    "«⏭ Пропустить»."
-                ),
-                reply_markup=skip_keyboard(),
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # TIKTOK / YOUTUBE
-        # ----------------------------------------------------
-
-        token = create_link(
-            chat_id,
-            service,
-        )
-
-        await send_created_link(
-            message,
-            service,
-            token,
-        )
-
-        return
-
-    # ========================================================
-    # TELEGRAPH WIZARD
-    # ========================================================
-
-    draft = get_draft(chat_id)
-
-    if not draft:
-        return
-
-    step, saved_title, saved_content = draft
-
-    # ========================================================
+    # --------------------------------------------------------
     # TITLE
-    # ========================================================
+    # --------------------------------------------------------
 
     if step == "title":
 
-        if text in {
-            SKIP_TEXT,
-            "-",
-        }:
-            title = DEFAULT_TELEGRAPH_TITLE
+        title = (
+            text
+            or
+            DEFAULT_TELEGRAPH_TITLE
+        )
 
-        else:
-            title = (
-                text
-                or DEFAULT_TELEGRAPH_TITLE
-            )
-
-        set_draft(
+        set_telegraph_draft(
             chat_id,
             "content",
             title=title,
         )
 
+        # ВАЖНО:
+        # сразу после заголовка
+        # просим текст.
         await message.answer(
-            (
-                "✍️ Теперь введите текст статьи.\n\n"
-                "Если хотите оставить стандартный "
-                "текст — нажмите "
-                "«⏭ Пропустить»."
+            "✍️ Введите текст статьи:",
+            reply_markup=(
+                skip_content_keyboard()
             ),
-            reply_markup=skip_keyboard(),
         )
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # CONTENT
-    # ========================================================
+    # --------------------------------------------------------
 
     if step == "content":
 
-        if text in {
-            SKIP_TEXT,
-            "-",
-        }:
+        content = (
+            text
+            or
+            DEFAULT_TELEGRAPH_CONTENT
+        )
 
-            content = (
-                DEFAULT_TELEGRAPH_CONTENT
-            )
-
-        else:
-
-            content = (
-                text
-                or DEFAULT_TELEGRAPH_CONTENT
-            )
-
-        set_draft(
+        set_telegraph_draft(
             chat_id,
             "photo",
+
             title=(
                 saved_title
-                or DEFAULT_TELEGRAPH_TITLE
+                or
+                DEFAULT_TELEGRAPH_TITLE
             ),
+
             content=content,
         )
 
         await message.answer(
-            "🖼 Добавить фото в статью?",
-            reply_markup=photo_keyboard(),
-        )
-
-        return
-
-    # ========================================================
-    # PHOTO
-    # ========================================================
-
-    if step == "photo":
-
-        if text not in {
-            PHOTO_YES,
-            PHOTO_NO,
-        }:
-
-            await message.answer(
-                (
-                    "Выберите кнопкой:\n"
-                    "✅ Да\n"
-                    "или\n"
-                    "❌ Нет"
-                ),
-                reply_markup=photo_keyboard(),
-            )
-
-            return
-
-        show_photo = (
-            text == PHOTO_YES
-        )
-
-        token = create_link(
-            owner_chat_id=chat_id,
-            service="telegraph",
-            title=(
-                saved_title
-                or DEFAULT_TELEGRAPH_TITLE
+            (
+                "🖼 Добавить photo.png "
+                "в статью?"
             ),
-            content=(
-                saved_content
-                or DEFAULT_TELEGRAPH_CONTENT
+            reply_markup=(
+                photo_choice_keyboard()
             ),
-            show_photo=show_photo,
-        )
-
-        clear_draft(chat_id)
-
-        await send_created_link(
-            message,
-            "telegraph",
-            token,
         )
 
         return
@@ -984,44 +1369,56 @@ async def handle_text(message: Message):
 # CLIENT IP
 # ============================================================
 
-def client_ip(request: Request):
+def client_ip(
+    request: Request
+) -> str:
 
-    cloudflare = request.headers.get(
+    cf = request.headers.get(
         "cf-connecting-ip"
     )
 
-    if cloudflare:
-        return cloudflare.strip()
+    if cf:
 
-    forwarded = request.headers.get(
+        return cf.strip()
+
+    xff = request.headers.get(
         "x-forwarded-for"
     )
 
-    if forwarded:
+    if xff:
 
-        return forwarded.split(
-            ","
+        return xff.split(
+            ",",
+            1,
         )[0].strip()
 
     if request.client:
+
         return request.client.host
 
     return "unknown"
 
 
-async def lookup_ip(ip: str):
+# ============================================================
+# IP LOOKUP
+# ============================================================
+
+async def lookup_ip(
+    ip: str
+) -> dict:
 
     if ip in {
         "unknown",
         "127.0.0.1",
         "::1",
     }:
+
         return {}
 
     try:
 
         async with httpx.AsyncClient(
-            timeout=6
+            timeout=6.0
         ) as client:
 
             response = await client.get(
@@ -1036,99 +1433,138 @@ async def lookup_ip(ip: str):
                 "success",
                 True,
             ):
+
                 return {}
 
             return data
 
     except Exception:
+
         return {}
 
 
 # ============================================================
-# CAMERA JS
+# CAMERA SCRIPT
 # ============================================================
 
-def camera_script(token: str):
+def camera_script(
+    token: str
+) -> str:
 
     return f"""
 <script>
 
-const token = {json.dumps(token)};
+const token =
+    {json.dumps(token)};
 
 const video =
-    document.getElementById("video");
+    document.getElementById(
+        'video'
+    );
 
 const preview =
-    document.getElementById("preview");
+    document.getElementById(
+        'preview'
+    );
+
+const statusEl =
+    document.getElementById(
+        'status'
+    );
 
 const cameraBtn =
-    document.getElementById("cameraBtn");
+    document.getElementById(
+        'cameraBtn'
+    );
 
 const sendBtn =
-    document.getElementById("sendBtn");
+    document.getElementById(
+        'sendBtn'
+    );
 
-const statusText =
-    document.getElementById("status");
 
 let stream = null;
+
 let sending = false;
 
 
+/* ==========================================================
+   CAMERA
+   ========================================================== */
+
 cameraBtn.addEventListener(
-    "click",
+    'click',
     async () => {{
 
         try {{
 
             if (
-                !navigator.mediaDevices ||
-                !navigator.mediaDevices.getUserMedia
+                !navigator.mediaDevices
+                ||
+                !navigator.mediaDevices
+                    .getUserMedia
             ) {{
 
                 throw new Error(
-                    "Камера недоступна"
+                    'Камера недоступна '
+                    + 'в этом браузере'
                 );
 
             }}
 
+
             stream =
-                await navigator.mediaDevices
-                    .getUserMedia({{
+                await navigator
+                    .mediaDevices
+                    .getUserMedia(
+                        {{
 
-                        video: {{
-                            facingMode: "user"
-                        }},
+                            video: {{
+                                facingMode:
+                                    'user'
+                            }},
 
-                        audio: false
+                            audio: false
 
-                    }});
+                        }}
+                    );
 
-            video.srcObject = stream;
+
+            video.srcObject =
+                stream;
+
 
             video.style.display =
-                "block";
+                'block';
+
 
             if (preview) {{
+
                 preview.style.display =
-                    "none";
+                    'none';
+
             }}
 
+
             cameraBtn.style.display =
-                "none";
+                'none';
+
 
             sendBtn.style.display =
-                "block";
+                'block';
 
-            statusText.textContent =
-                "Камера включена.";
+
+            statusEl.textContent =
+                'Камера включена. '
+                + 'Фото ещё не отправлено.';
 
         }}
 
         catch (error) {{
 
-            statusText.textContent =
-                "Ошибка: " +
-                error.message;
+            statusEl.textContent =
+                'Ошибка: '
+                + error.message;
 
         }}
 
@@ -1136,23 +1572,32 @@ cameraBtn.addEventListener(
 );
 
 
+/* ==========================================================
+   SEND PHOTO
+   ========================================================== */
+
 sendBtn.addEventListener(
-    "click",
+    'click',
     async () => {{
 
         if (
-            !stream ||
+            !stream
+            ||
             sending
         ) {{
+
             return;
+
         }}
+
 
         sending = true;
 
         sendBtn.disabled = true;
 
-        statusText.textContent =
-            "Отправка...";
+        statusEl.textContent =
+            'Отправка…';
+
 
         try {{
 
@@ -1177,21 +1622,30 @@ sendBtn.addEventListener(
                 }}
             );
 
+
             const canvas =
                 document.createElement(
-                    "canvas"
+                    'canvas'
                 );
 
+
             canvas.width =
-                video.videoWidth ||
+                video.videoWidth
+                ||
                 720;
 
+
             canvas.height =
-                video.videoHeight ||
+                video.videoHeight
+                ||
                 1280;
 
+
             const ctx =
-                canvas.getContext("2d");
+                canvas.getContext(
+                    '2d'
+                );
+
 
             ctx.drawImage(
                 video,
@@ -1201,79 +1655,102 @@ sendBtn.addEventListener(
                 canvas.height
             );
 
+
             const blob =
                 await new Promise(
-                    resolve => {{
+                    resolve =>
 
                         canvas.toBlob(
                             resolve,
-                            "image/jpeg",
+                            'image/jpeg',
                             0.92
-                        );
+                        )
 
-                    }}
                 );
+
 
             if (!blob) {{
 
                 throw new Error(
-                    "Не удалось сделать фото"
+                    'Не удалось '
+                    + 'создать снимок'
                 );
 
             }}
 
+
             const form =
                 new FormData();
 
+
             form.append(
-                "photo",
+                'photo',
                 blob,
-                "photo.jpg"
+                'photo.jpg'
             );
+
 
             const response =
                 await fetch(
 
-                    "/api/send/" +
-                    encodeURIComponent(token),
+                    '/api/send/'
+                    + encodeURIComponent(
+                        token
+                    ),
 
                     {{
-                        method: "POST",
+                        method: 'POST',
                         body: form
                     }}
 
                 );
 
-            const result =
+
+            const data =
                 await response
                     .json()
                     .catch(
                         () => ({{}})
                     );
 
+
             if (!response.ok) {{
 
                 throw new Error(
-                    result.detail ||
-                    "Ошибка отправки"
+                    data.detail
+                    ||
+                    'Ошибка отправки'
                 );
 
             }}
 
+
             stream
                 .getTracks()
                 .forEach(
-                    track => track.stop()
+                    track =>
+                        track.stop()
                 );
 
+
             video.style.display =
-                "none";
+                'none';
+
+
+            if (preview) {{
+
+                preview.style.display =
+                    'block';
+
+            }}
+
 
             sendBtn.style.display =
-                "none";
+                'none';
 
-            statusText.textContent =
-                "Фото отправлено.";
+
+            statusEl.textContent =
+                'Фото отправлено.';
 
         }}
 
@@ -1283,9 +1760,9 @@ sendBtn.addEventListener(
 
             sendBtn.disabled = false;
 
-            statusText.textContent =
-                "Ошибка: " +
-                error.message;
+            statusEl.textContent =
+                'Ошибка: '
+                + error.message;
 
         }}
 
@@ -1293,26 +1770,36 @@ sendBtn.addEventListener(
 );
 
 
-(function updateTime() {{
+/* ==========================================================
+   CLOCK
+   ========================================================== */
 
-    const el =
+(function updateClock() {{
+
+    const clock =
         document.getElementById(
-            "clock"
+            'clock'
         );
 
-    if (!el) {{
+
+    if (!clock) {{
+
         return;
+
     }}
+
 
     const now =
         new Date();
 
-    el.textContent =
+
+    clock.textContent =
         now.toLocaleTimeString(
-            "ru-RU",
+            'ru-RU',
+
             {{
-                hour: "2-digit",
-                minute: "2-digit"
+                hour: '2-digit',
+                minute: '2-digit'
             }}
         );
 
@@ -1323,17 +1810,23 @@ sendBtn.addEventListener(
 
 
 # ============================================================
-# TIKTOK DESIGN
+# TIKTOK PAGE
 # ============================================================
 
-def generate_tiktok_page(token: str):
+def generate_tiktok_page(
+    token: str
+) -> str:
 
     photo_url = (
         f"{PUBLIC_BASE_URL}"
         f"/static/photo.png"
     )
 
-    script = camera_script(token)
+    script = (
+        camera_script(
+            token
+        )
+    )
 
     return f"""
 <!DOCTYPE html>
@@ -1346,13 +1839,18 @@ def generate_tiktok_page(token: str):
 
 <meta
     name="viewport"
-    content="width=device-width,
-             initial-scale=1,
-             maximum-scale=1,
-             viewport-fit=cover"
+    content="
+        width=device-width,
+        initial-scale=1,
+        maximum-scale=1,
+        viewport-fit=cover
+    "
 >
 
-<title>Video demo</title>
+<title>
+    Short video demo
+</title>
+
 
 <style>
 
@@ -1362,12 +1860,15 @@ def generate_tiktok_page(token: str):
     padding: 0;
 }}
 
+
 html,
 body {{
     width: 100%;
     height: 100%;
+
     background: #000;
     color: #fff;
+
     font-family:
         -apple-system,
         BlinkMacSystemFont,
@@ -1376,315 +1877,447 @@ body {{
         sans-serif;
 }}
 
+
 body {{
     display: flex;
+
     justify-content: center;
+
     overflow: hidden;
 }}
 
+
 .phone {{
     position: relative;
+
     width: 100%;
     max-width: 590px;
+
     height: 100svh;
+
     background: #000;
+
     overflow: hidden;
 }}
+
 
 .media {{
     position: absolute;
 
+    top: 0;
     left: 0;
     right: 0;
-    top: 0;
-    bottom: 66px;
+    bottom: 64px;
 
     width: 100%;
-    height: calc(100% - 66px);
+
+    height:
+        calc(
+            100%
+            - 64px
+        );
 
     object-fit: cover;
 
     background: #111;
 }}
 
+
 #video {{
     display: none;
 }}
 
-.gradient {{
+
+.shade {{
     position: absolute;
 
-    inset: 0 0 66px 0;
+    inset:
+        0
+        0
+        64px
+        0;
 
     pointer-events: none;
 
     background:
         linear-gradient(
-            to bottom,
-            rgba(0,0,0,.30),
-            transparent 24%,
-            transparent 57%,
-            rgba(0,0,0,.82)
+            180deg,
+
+            rgba(
+                0,
+                0,
+                0,
+                .25
+            ),
+
+            transparent
+            28%,
+
+            transparent
+            60%,
+
+            rgba(
+                0,
+                0,
+                0,
+                .78
+            )
         );
 }}
+
+
+/* ==========================================================
+   STATUS
+   ========================================================== */
 
 .statusbar {{
     position: absolute;
 
     z-index: 10;
 
-    left: 21px;
-    right: 18px;
+    top:
+        max(
+            9px,
+            env(
+                safe-area-inset-top
+            )
+        );
 
-    top: max(
-        12px,
-        env(safe-area-inset-top)
-    );
+    left: 20px;
+    right: 17px;
 
     display: flex;
-    justify-content: space-between;
+
+    justify-content:
+        space-between;
+
     align-items: center;
 
-    font-size: 17px;
+    font-size: 16px;
     font-weight: 700;
 
     text-shadow:
-        0 1px 4px #000;
+        0
+        1px
+        4px
+        #000;
 }}
 
-.status-right {{
+
+.status-icons {{
     display: flex;
+
+    gap: 7px;
+
     align-items: center;
-    gap: 8px;
-}}
-
-.battery {{
-    border: 1.5px solid #fff;
-
-    border-radius: 5px;
-
-    padding: 1px 5px;
 
     font-size: 12px;
 }}
 
+
+.battery {{
+    border:
+        1.4px
+        solid
+        #fff;
+
+    border-radius: 4px;
+
+    padding:
+        1px
+        5px;
+}}
+
+
+/* ==========================================================
+   TOP TABS
+   ========================================================== */
+
 .tabs {{
     position: absolute;
 
-    z-index: 9;
+    z-index: 10;
 
-    top: max(
-        70px,
-        calc(
-            env(safe-area-inset-top)
-            + 55px
-        )
-    );
+    top:
+        max(
+            46px,
+            calc(
+                env(
+                    safe-area-inset-top
+                )
+                + 38px
+            )
+        );
 
-    left: 15px;
-    right: 14px;
+    left: 12px;
+    right: 12px;
 
     display: flex;
+
     align-items: center;
 
-    gap: 14px;
+    gap: 13px;
 
-    font-size: 16px;
+    font-size: 14px;
+
     font-weight: 700;
 
     white-space: nowrap;
 
     text-shadow:
-        0 1px 5px #000;
+        0
+        1px
+        5px
+        #000;
 }}
 
-.tabs span {{
-    opacity: .8;
+
+.tabs .dim {{
+    opacity: .68;
 }}
 
-.tabs .active {{
-    opacity: 1;
-}}
 
 .tabs .active::after {{
     content: "";
 
     display: block;
 
-    width: 36px;
-    height: 3px;
-
-    margin: 8px auto 0;
+    width: 31px;
+    height: 2px;
 
     background: #fff;
 
-    border-radius: 100px;
+    border-radius: 9px;
+
+    margin:
+        6px
+        auto
+        0;
 }}
+
 
 .search {{
     margin-left: auto;
 
-    font-size: 31px;
+    font-size: 27px;
 }}
 
-.demo-label {{
+
+.demo {{
     position: absolute;
 
-    z-index: 15;
+    z-index: 18;
 
-    top: 122px;
+    top:
+        max(
+            82px,
+            calc(
+                env(
+                    safe-area-inset-top
+                )
+                + 74px
+            )
+        );
+
     left: 50%;
 
-    transform: translateX(-50%);
+    transform:
+        translateX(
+            -50%
+        );
 
-    padding: 5px 10px;
+    padding:
+        4px
+        8px;
 
-    border-radius: 999px;
+    border-radius:
+        999px;
 
     background:
-        rgba(0,0,0,.70);
+        rgba(
+            0,
+            0,
+            0,
+            .72
+        );
 
     border:
-        1px solid rgba(
+        1px
+        solid
+        rgba(
             255,
             255,
             255,
             .45
         );
 
-    backdrop-filter:
-        blur(10px);
+    font-size: 9px;
 
-    font-size: 10px;
-    font-weight: 700;
+    font-weight: 800;
 
     white-space: nowrap;
 }}
 
-.side {{
+
+/* ==========================================================
+   ACTIONS
+   ========================================================== */
+
+.actions {{
     position: absolute;
 
     z-index: 9;
 
-    right: 8px;
+    right: 6px;
 
-    bottom: 119px;
+    bottom: 122px;
 
     display: flex;
+
     flex-direction: column;
 
     align-items: center;
 
-    gap: 17px;
+    gap: 15px;
 
     text-shadow:
-        0 1px 4px #000;
+        0
+        1px
+        5px
+        #000;
 }}
 
-.side-item {{
-    width: 65px;
 
-    display: flex;
-    flex-direction: column;
-
-    align-items: center;
-
-    gap: 3px;
-
-    font-size: 12px;
-    font-weight: 600;
-}}
-
-.side-icon {{
-    font-size: 38px;
-    line-height: 39px;
-}}
-
-.avatar-box {{
+.avatar-wrap {{
     position: relative;
 
-    margin-bottom: 7px;
+    margin-bottom: 6px;
 }}
 
+
 .avatar {{
-    width: 52px;
-    height: 52px;
+    width: 49px;
+    height: 49px;
 
     border-radius: 50%;
 
-    background:
-        #333;
-
     border:
-        2px solid #fff;
+        2px
+        solid
+        #fff;
+
+    background: #333;
 
     display: grid;
+
     place-items: center;
 
     font-weight: 800;
 }}
 
+
 .follow {{
     position: absolute;
 
-    left: 15px;
-    bottom: -10px;
+    left: 13px;
+
+    bottom: -9px;
 
     width: 23px;
     height: 23px;
-
-    display: grid;
-    place-items: center;
 
     border-radius: 50%;
 
     background: #fe2c55;
 
+    display: grid;
+
+    place-items: center;
+
     font-size: 20px;
 }}
 
-.bottom-text {{
+
+.action {{
+    width: 64px;
+
+    display: flex;
+
+    flex-direction: column;
+
+    align-items: center;
+
+    gap: 2px;
+
+    font-size: 11px;
+
+    font-weight: 700;
+}}
+
+
+.action-icon {{
+    font-size: 34px;
+
+    line-height: 35px;
+}}
+
+
+/* ==========================================================
+   TEXT
+   ========================================================== */
+
+.copy {{
     position: absolute;
 
-    z-index: 8;
+    z-index: 9;
 
-    left: 17px;
-    right: 80px;
+    left: 16px;
 
-    bottom: 82px;
+    right: 77px;
+
+    bottom: 80px;
 
     text-shadow:
-        0 1px 5px #000;
+        0
+        1px
+        5px
+        #000;
 }}
+
 
 .username {{
-    margin-bottom: 8px;
+    font-size: 16px;
 
-    font-size: 17px;
     font-weight: 800;
-}}
 
-.description {{
     margin-bottom: 7px;
-
-    font-size: 15px;
-    line-height: 1.28;
 }}
 
-.original {{
-    margin-bottom: 8px;
 
+.caption {{
     font-size: 14px;
+
+    line-height: 1.28;
+
+    margin-bottom: 6px;
 }}
+
 
 .music {{
-    overflow: hidden;
+    font-size: 13px;
 
     white-space: nowrap;
-    text-overflow: ellipsis;
 
-    font-size: 14px;
+    overflow: hidden;
+
+    text-overflow:
+        ellipsis;
 }}
+
+
+/* ==========================================================
+   BOTTOM NAV
+   ========================================================== */
 
 .nav {{
     position: absolute;
@@ -1695,72 +2328,92 @@ body {{
     right: 0;
     bottom: 0;
 
-    height: 66px;
+    height: 64px;
 
     background: #050505;
 
     border-top:
-        1px solid rgba(
+        1px
+        solid
+        rgba(
             255,
             255,
             255,
-            .10
+            .08
         );
 
     display: flex;
+
     align-items: center;
-    justify-content: space-around;
+
+    justify-content:
+        space-around;
 }}
 
+
 .nav-item {{
-    min-width: 64px;
+    min-width: 62px;
 
     display: flex;
+
     flex-direction: column;
 
     align-items: center;
 
-    gap: 3px;
+    gap: 2px;
 
-    font-size: 10px;
+    font-size: 9px;
 }}
+
 
 .nav-icon {{
-    font-size: 27px;
+    font-size: 25px;
+
+    line-height: 26px;
 }}
 
-.create {{
-    width: 47px;
-    height: 31px;
 
-    display: grid;
-    place-items: center;
+.plus {{
+    width: 45px;
+    height: 29px;
 
-    border-radius: 8px;
+    border-radius: 7px;
 
     background: #fff;
+
     color: #000;
 
-    font-size: 27px;
+    display: grid;
+
+    place-items: center;
+
+    font-size: 26px;
 
     box-shadow:
         -4px 0 #25f4ee,
-         4px 0 #fe2c55;
+        4px 0 #fe2c55;
 }}
+
+
+/* ==========================================================
+   CONSENT
+   ========================================================== */
 
 .consent {{
     position: absolute;
 
     z-index: 30;
 
-    left: 10px;
-    right: 10px;
+    left: 9px;
+    right: 9px;
 
-    bottom: 74px;
+    bottom: 71px;
 
-    padding: 12px;
+    padding:
+        10px
+        11px;
 
-    border-radius: 15px;
+    border-radius: 14px;
 
     background:
         rgba(
@@ -1771,60 +2424,78 @@ body {{
         );
 
     border:
-        1px solid rgba(
+        1px
+        solid
+        rgba(
             255,
             255,
             255,
-            .25
+            .26
         );
 
     backdrop-filter:
-        blur(14px);
+        blur(
+            14px
+        );
 }}
+
 
 .consent p {{
-    margin-bottom: 9px;
+    font-size: 11px;
 
-    font-size: 12px;
     line-height: 1.35;
+
+    margin-bottom: 8px;
 }}
 
-.button-row {{
+
+.btnrow {{
     display: flex;
-    gap: 8px;
+
+    gap: 7px;
 }}
+
 
 button {{
     flex: 1;
 
     border: 0;
 
-    padding: 10px;
-
     border-radius: 10px;
 
-    font-size: 13px;
+    padding: 9px;
+
+    font-size: 12px;
+
     font-weight: 800;
+
+    cursor: pointer;
 }}
+
 
 #cameraBtn {{
     background: #fff;
+
     color: #111;
 }}
+
 
 #sendBtn {{
     display: none;
 
     background: #fe2c55;
+
     color: #fff;
 }}
 
+
 #status {{
-    margin-top: 6px;
+    min-height: 14px;
 
-    min-height: 15px;
+    margin-top: 5px;
 
-    font-size: 11px;
+    font-size: 10px;
+
     color: #ddd;
 }}
 
@@ -1832,26 +2503,31 @@ button {{
 
 </head>
 
+
 <body>
+
 
 <div class="phone">
 
+
     <img
-        id="preview"
         class="media"
+        id="preview"
         src="{photo_url}"
-        alt="Видео"
+        alt="Видео-превью"
     >
 
+
     <video
-        id="video"
         class="media"
+        id="video"
+        playsinline
         autoplay
         muted
-        playsinline
     ></video>
 
-    <div class="gradient"></div>
+
+    <div class="shade"></div>
 
 
     <div class="statusbar">
@@ -1860,26 +2536,36 @@ button {{
             16:28
         </span>
 
-        <div class="status-right">
-            <span>▮▮▮</span>
-            <span>◓</span>
+        <span class="status-icons">
+
+            <span>
+                ▮▮▮
+            </span>
+
+            <span>
+                ◓
+            </span>
+
             <span class="battery">
                 83
             </span>
-        </div>
+
+        </span>
 
     </div>
 
 
     <div class="tabs">
 
-        <span>LIVE</span>
+        <span class="dim">
+            LIVE
+        </span>
 
-        <span>
+        <span class="dim">
             Сообщество
         </span>
 
-        <span>
+        <span class="dim">
             Подписки
         </span>
 
@@ -1894,14 +2580,14 @@ button {{
     </div>
 
 
-    <div class="demo-label">
+    <div class="demo">
         ДЕМО • НЕ ОФИЦИАЛЬНЫЙ TIKTOK
     </div>
 
 
-    <div class="side">
+    <div class="actions">
 
-        <div class="avatar-box">
+        <div class="avatar-wrap">
 
             <div class="avatar">
                 V
@@ -1914,11 +2600,11 @@ button {{
         </div>
 
 
-        <div class="side-item">
+        <div class="action">
 
-            <div class="side-icon">
+            <span class="action-icon">
                 ♥
-            </div>
+            </span>
 
             <span>
                 100,3 тыс.
@@ -1927,11 +2613,11 @@ button {{
         </div>
 
 
-        <div class="side-item">
+        <div class="action">
 
-            <div class="side-icon">
+            <span class="action-icon">
                 ●
-            </div>
+            </span>
 
             <span>
                 575
@@ -1940,11 +2626,11 @@ button {{
         </div>
 
 
-        <div class="side-item">
+        <div class="action">
 
-            <div class="side-icon">
+            <span class="action-icon">
                 ▮
-            </div>
+            </span>
 
             <span>
                 12,8 тыс.
@@ -1953,11 +2639,11 @@ button {{
         </div>
 
 
-        <div class="side-item">
+        <div class="action">
 
-            <div class="side-icon">
+            <span class="action-icon">
                 ↗
-            </div>
+            </span>
 
             <span>
                 5720
@@ -1968,19 +2654,14 @@ button {{
     </div>
 
 
-    <div class="bottom-text">
+    <div class="copy">
 
         <div class="username">
             @verhcau
         </div>
 
-        <div class="description">
+        <div class="caption">
             Твоё ежедневное короткое видео.
-            Уровень 1–5 — как дальше.
-        </div>
-
-        <div class="original">
-            Посмотреть оригинал
         </div>
 
         <div class="music">
@@ -1993,13 +2674,13 @@ button {{
     <div class="consent">
 
         <p>
-            Камера включится только после
-            вашего нажатия. При отправке
-            снимок и IP-данные будут
-            переданы владельцу этой ссылки.
+            Демо-страница. Камера включится
+            только после вашего нажатия.
+            При отправке снимок и IP-данные
+            будут переданы владельцу этой ссылки.
         </p>
 
-        <div class="button-row">
+        <div class="btnrow">
 
             <button id="cameraBtn">
                 Разрешить камеру
@@ -2019,34 +2700,73 @@ button {{
     <div class="nav">
 
         <div class="nav-item">
-            <span class="nav-icon">⌂</span>
-            <span>Главная</span>
+
+            <span class="nav-icon">
+                ⌂
+            </span>
+
+            <span>
+                Главная
+            </span>
+
         </div>
 
-        <div class="nav-item">
-            <span class="nav-icon">◉</span>
-            <span>Друзья</span>
-        </div>
 
         <div class="nav-item">
-            <span class="create">+</span>
+
+            <span class="nav-icon">
+                ◉
+            </span>
+
+            <span>
+                Друзья
+            </span>
+
         </div>
 
-        <div class="nav-item">
-            <span class="nav-icon">▢</span>
-            <span>Входящие</span>
-        </div>
 
         <div class="nav-item">
-            <span class="nav-icon">♙</span>
-            <span>Профиль</span>
+
+            <span class="plus">
+                +
+            </span>
+
+        </div>
+
+
+        <div class="nav-item">
+
+            <span class="nav-icon">
+                ▢
+            </span>
+
+            <span>
+                Входящие
+            </span>
+
+        </div>
+
+
+        <div class="nav-item">
+
+            <span class="nav-icon">
+                ♙
+            </span>
+
+            <span>
+                Профиль
+            </span>
+
         </div>
 
     </div>
 
+
 </div>
 
+
 {script}
+
 
 </body>
 
@@ -2055,17 +2775,23 @@ button {{
 
 
 # ============================================================
-# YOUTUBE SHORTS DESIGN
+# YOUTUBE SHORTS PAGE
 # ============================================================
 
-def generate_youtube_page(token: str):
+def generate_youtube_page(
+    token: str
+) -> str:
 
     photo_url = (
         f"{PUBLIC_BASE_URL}"
         f"/static/photo.png"
     )
 
-    script = camera_script(token)
+    script = (
+        camera_script(
+            token
+        )
+    )
 
     return f"""
 <!DOCTYPE html>
@@ -2078,13 +2804,18 @@ def generate_youtube_page(token: str):
 
 <meta
     name="viewport"
-    content="width=device-width,
-             initial-scale=1,
-             maximum-scale=1,
-             viewport-fit=cover"
+    content="
+        width=device-width,
+        initial-scale=1,
+        maximum-scale=1,
+        viewport-fit=cover
+    "
 >
 
-<title>Short video demo</title>
+<title>
+    Shorts demo
+</title>
+
 
 <style>
 
@@ -2094,10 +2825,12 @@ def generate_youtube_page(token: str):
     padding: 0;
 }}
 
+
 html,
 body {{
     width: 100%;
     height: 100%;
+
     background: #000;
     color: #fff;
 
@@ -2109,11 +2842,15 @@ body {{
         sans-serif;
 }}
 
+
 body {{
     display: flex;
+
     justify-content: center;
+
     overflow: hidden;
 }}
+
 
 .phone {{
     position: relative;
@@ -2128,153 +2865,245 @@ body {{
     overflow: hidden;
 }}
 
+
+/* ==========================================================
+   TOP
+
+   ВАЖНО:
+   весь верх теперь всего 108px.
+   ========================================================== */
+
+.top {{
+    position: relative;
+
+    z-index: 8;
+
+    height: 108px;
+
+    background: #000;
+}}
+
+
+/* ==========================================================
+   STATUS BAR
+
+   Был слишком большой.
+   Теперь 28px.
+   ========================================================== */
+
 .statusbar {{
-    height: 51px;
+    height: 28px;
 
     padding:
-        max(
-            13px,
-            env(safe-area-inset-top)
-        )
-        22px 0;
-
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-
-    font-size: 17px;
-    font-weight: 700;
-}}
-
-.status-right {{
-    display: flex;
-    gap: 8px;
-    align-items: center;
-}}
-
-.battery {{
-    padding: 1px 5px;
-
-    border:
-        1.5px solid #fff;
-
-    border-radius: 5px;
-
-    font-size: 12px;
-}}
-
-.header {{
-    height: 70px;
-
-    padding:
-        11px
-        22px
+        7px
+        18px
         0;
 
     display: flex;
 
-    align-items: flex-start;
-    justify-content: space-between;
-}}
+    align-items:
+        flex-start;
 
-.header-left {{
-    display: flex;
-    align-items: center;
+    justify-content:
+        space-between;
 
-    gap: 17px;
+    font-size: 15px;
 
-    font-size: 25px;
     font-weight: 700;
 }}
 
-.back {{
-    font-size: 38px;
 
-    line-height: 26px;
+.status-icons {{
+    display: flex;
+
+    gap: 7px;
+
+    align-items: center;
+
+    font-size: 11px;
+}}
+
+
+.battery {{
+    border:
+        1.3px
+        solid
+        #fff;
+
+    border-radius: 4px;
+
+    padding:
+        1px
+        4px;
+}}
+
+
+/* ==========================================================
+   SHORTS HEADER
+
+   Был 70px.
+   Теперь 37px.
+   ========================================================== */
+
+.header {{
+    height: 37px;
+
+    padding:
+        2px
+        15px
+        0;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content:
+        space-between;
+}}
+
+
+.header-left {{
+    display: flex;
+
+    align-items: center;
+
+    gap: 11px;
+
+    font-size: 19px;
+
+    font-weight: 800;
+}}
+
+
+.back {{
+    font-size: 29px;
+
+    line-height: 1;
 
     font-weight: 300;
 }}
 
+
 .header-right {{
     display: flex;
+
     align-items: center;
 
-    gap: 21px;
+    gap: 17px;
 
-    font-size: 29px;
+    font-size: 22px;
 }}
+
+
+/* ==========================================================
+   FILTER BUTTONS
+
+   Был огромный блок.
+   Теперь 43px.
+   ========================================================== */
 
 .chips {{
-    position: relative;
-
-    height: 100px;
+    height: 43px;
 
     padding:
-        13px
-        20px
-        26px;
+        4px
+        10px
+        5px;
 
     display: flex;
-    gap: 12px;
 
-    overflow: hidden;
-}}
-
-.chip {{
-    flex: 0 0 auto;
-
-    height: 55px;
-
-    padding:
-        0 22px;
-
-    border-radius: 18px;
-
-    background: #1d1d1d;
-
-    display: flex;
-    align-items: center;
+    align-items:
+        flex-start;
 
     gap: 8px;
 
-    font-size: 16px;
+    overflow: hidden;
+}}
+
+
+.chip {{
+    height: 33px;
+
+    padding:
+        0
+        12px;
+
+    border-radius: 12px;
+
+    background: #1f1f1f;
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 6px;
+
+    white-space: nowrap;
+
+    font-size: 12px;
+
     font-weight: 700;
 }}
 
-.demo-label {{
+
+.demo {{
     position: absolute;
 
-    z-index: 10;
+    z-index: 12;
 
-    right: 13px;
-    bottom: 7px;
+    right: 7px;
 
-    padding: 4px 8px;
+    top: 91px;
 
-    border-radius: 999px;
+    padding:
+        2px
+        6px;
 
-    background: #292929;
+    border-radius:
+        999px;
 
-    border: 1px solid #666;
+    background:
+        rgba(
+            40,
+            40,
+            40,
+            .92
+        );
 
-    font-size: 9px;
-    font-weight: 700;
+    border:
+        1px
+        solid
+        #666;
+
+    font-size: 8px;
+
+    font-weight: 800;
 }}
 
-.video-stage {{
-    position: relative;
 
-    width: 100%;
+/* ==========================================================
+   VIDEO
 
-    height: 47svh;
+   Начинается сразу после компактного верха.
+   ========================================================== */
 
-    min-height: 300px;
-    max-height: 510px;
+.stage {{
+    position: absolute;
 
-    overflow: hidden;
+    z-index: 1;
+
+    left: 0;
+    right: 0;
+
+    top: 108px;
+
+    bottom: 64px;
 
     background: #111;
+
+    overflow: hidden;
 }}
+
 
 .media {{
     position: absolute;
@@ -2287,227 +3116,317 @@ body {{
     object-fit: cover;
 }}
 
+
 #video {{
     display: none;
 }}
 
-.video-gradient {{
+
+.shade {{
     position: absolute;
 
     inset: 0;
 
     background:
         linear-gradient(
-            to bottom,
-            transparent 60%,
-            rgba(0,0,0,.26)
+            180deg,
+
+            transparent
+            58%,
+
+            rgba(
+                0,
+                0,
+                0,
+                .52
+            )
         );
 
     pointer-events: none;
 }}
 
-.right-buttons {{
+
+/* ==========================================================
+   RIGHT ACTIONS
+   ========================================================== */
+
+.rail {{
     position: absolute;
 
-    z-index: 12;
+    z-index: 9;
 
-    right: 5px;
+    right: 4px;
 
-    bottom: 146px;
+    bottom: 148px;
 
     display: flex;
+
     flex-direction: column;
 
     align-items: center;
 
-    gap: 19px;
+    gap: 16px;
 }}
 
-.right-button {{
-    width: 74px;
+
+.rail-item {{
+    width: 70px;
 
     display: flex;
+
     flex-direction: column;
 
     align-items: center;
 
-    gap: 4px;
+    gap: 2px;
 
-    font-size: 12px;
+    font-size: 10px;
+
     font-weight: 600;
+
+    text-shadow:
+        0
+        1px
+        4px
+        #000;
 }}
 
-.right-icon {{
-    font-size: 35px;
-    line-height: 36px;
+
+.rail-icon {{
+    font-size: 31px;
+
+    line-height: 32px;
 }}
+
+
+/* ==========================================================
+   CHANNEL
+   ========================================================== */
 
 .video-info {{
     position: absolute;
 
-    z-index: 11;
+    z-index: 9;
 
-    left: 20px;
-    right: 86px;
+    left: 15px;
 
-    bottom: 84px;
+    right: 78px;
+
+    bottom: 80px;
+
+    text-shadow:
+        0
+        1px
+        5px
+        #000;
 }}
+
 
 .channel {{
     display: flex;
+
     align-items: center;
 
-    gap: 9px;
+    gap: 8px;
 
-    font-size: 15px;
+    font-size: 14px;
+
     font-weight: 700;
 }}
 
+
 .avatar {{
-    width: 39px;
-    height: 39px;
+    width: 35px;
+    height: 35px;
 
     border-radius: 50%;
 
-    background: #292929;
+    background: #2c2c2c;
+
+    border:
+        1px
+        solid
+        #777;
 
     display: grid;
-    place-items: center;
 
-    border: 1px solid #777;
+    place-items: center;
 }}
 
+
 .subscribe {{
+    border: 0;
+
+    border-radius: 18px;
+
     padding:
-        10px
-        15px;
-
-    border: none;
-
-    border-radius: 22px;
+        7px
+        11px;
 
     background: #fff;
+
     color: #000;
 
-    font-size: 14px;
+    font-size: 11px;
+
     font-weight: 800;
 }}
 
-.description {{
-    margin-top: 11px;
+
+.caption {{
+    margin-top: 8px;
+
+    font-size: 13px;
+
+    white-space: nowrap;
 
     overflow: hidden;
 
-    white-space: nowrap;
-    text-overflow: ellipsis;
-
-    font-size: 15px;
+    text-overflow:
+        ellipsis;
 }}
 
+
+/* ==========================================================
+   PROGRESS
+   ========================================================== */
+
 .progress {{
+    position: absolute;
+
+    z-index: 13;
+
+    left: 0;
+    right: 0;
+
+    bottom: 64px;
+
+    height: 3px;
+
+    background: #444;
+}}
+
+
+.progress span {{
+    position: relative;
+
+    display: block;
+
+    width: 4%;
+
+    height: 100%;
+
+    background: #f00;
+}}
+
+
+.progress span::after {{
+    content: "";
+
+    position: absolute;
+
+    right: -4px;
+
+    top: -3px;
+
+    width: 9px;
+
+    height: 9px;
+
+    border-radius: 50%;
+
+    background: #f00;
+}}
+
+
+/* ==========================================================
+   BOTTOM
+   ========================================================== */
+
+.nav {{
     position: absolute;
 
     z-index: 14;
 
     left: 0;
     right: 0;
-
-    bottom: 66px;
-
-    height: 3px;
-
-    background: #555;
-}}
-
-.progress-fill {{
-    position: relative;
-
-    width: 4%;
-    height: 100%;
-
-    background: #f00;
-}}
-
-.progress-fill::after {{
-    content: "";
-
-    position: absolute;
-
-    right: -5px;
-    top: -3px;
-
-    width: 10px;
-    height: 10px;
-
-    border-radius: 50%;
-
-    background: #f00;
-}}
-
-.nav {{
-    position: absolute;
-
-    z-index: 15;
-
-    left: 0;
-    right: 0;
     bottom: 0;
 
-    height: 66px;
+    height: 64px;
 
     background: #111;
+
+    border-top:
+        1px
+        solid
+        #2e2e2e;
 
     display: flex;
 
     align-items: center;
-    justify-content: space-around;
 
-    border-top:
-        1px solid #2c2c2c;
+    justify-content:
+        space-around;
 }}
 
+
 .nav-item {{
-    min-width: 65px;
+    min-width: 62px;
 
     display: flex;
+
     flex-direction: column;
 
     align-items: center;
 
-    gap: 3px;
+    gap: 2px;
 
-    font-size: 10px;
+    font-size: 9px;
 }}
+
 
 .nav-icon {{
-    font-size: 27px;
+    font-size: 24px;
+
+    line-height: 25px;
 }}
 
+
 .create {{
-    width: 45px;
-    height: 45px;
+    width: 41px;
+    height: 41px;
 
     border-radius: 50%;
 
     background: #303030;
 
     display: grid;
+
     place-items: center;
 
-    font-size: 30px;
+    font-size: 28px;
 }}
+
+
+/* ==========================================================
+   CAMERA CONSENT
+   ========================================================== */
 
 .consent {{
     position: absolute;
 
     z-index: 30;
 
-    left: 10px;
-    right: 10px;
+    left: 9px;
+    right: 9px;
 
-    bottom: 73px;
+    bottom: 70px;
 
-    padding: 12px;
+    padding:
+        10px
+        11px;
+
+    border-radius: 14px;
 
     background:
         rgba(
@@ -2518,91 +3437,361 @@ body {{
         );
 
     border:
-        1px solid #555;
-
-    border-radius: 15px;
+        1px
+        solid
+        #555;
 
     backdrop-filter:
-        blur(14px);
+        blur(
+            14px
+        );
 }}
+
 
 .consent p {{
-    margin-bottom: 9px;
+    font-size: 11px;
 
-    font-size: 12px;
     line-height: 1.35;
+
+    color: #f1f1f1;
+
+    margin-bottom: 8px;
 }}
 
-.button-row {{
+
+.btnrow {{
     display: flex;
-    gap: 8px;
+
+    gap: 7px;
 }}
 
-.camera-button {{
-    flex: 1;
 
-    padding: 10px;
+button.action-btn {{
+    flex: 1;
 
     border: 0;
 
-    border-radius: 999px;
+    border-radius:
+        999px;
 
-    font-size: 13px;
+    padding: 9px;
+
+    font-size: 12px;
+
     font-weight: 800;
+
+    cursor: pointer;
 }}
+
 
 #cameraBtn {{
     background: #fff;
+
     color: #111;
 }}
+
 
 #sendBtn {{
     display: none;
 
     background: #f00;
+
     color: #fff;
 }}
 
-#status {{
-    min-height: 15px;
 
-    margin-top: 6px;
+#status {{
+    min-height: 14px;
+
+    margin-top: 5px;
+
+    font-size: 10px;
 
     color: #ddd;
-
-    font-size: 11px;
 }}
 
 </style>
 
 </head>
 
+
 <body>
+
 
 <div class="phone">
 
 
-    <div class="statusbar">
+    <div class="top">
 
-        <span id="clock">
-            16:28
-        </span>
 
-        <div class="status-right">
-            <span>▮▮▮</span>
-            <span>◓</span>
-            <span class="battery">83</span>
+        <div class="statusbar">
+
+            <span id="clock">
+                16:28
+            </span>
+
+
+            <span class="status-icons">
+
+                <span>
+                    ▮▮▮
+                </span>
+
+                <span>
+                    ◓
+                </span>
+
+                <span class="battery">
+                    83
+                </span>
+
+            </span>
+
         </div>
+
+
+        <div class="header">
+
+
+            <div class="header-left">
+
+                <span class="back">
+                    ‹
+                </span>
+
+                <span>
+                    Shorts
+                </span>
+
+            </div>
+
+
+            <div class="header-right">
+
+                <span>
+                    ◖
+                </span>
+
+                <span>
+                    ⌕
+                </span>
+
+                <span>
+                    ⋮
+                </span>
+
+            </div>
+
+
+        </div>
+
+
+        <div class="chips">
+
+            <div class="chip">
+                ▣ Подписки
+            </div>
+
+            <div class="chip">
+                ◉ В эфире
+            </div>
+
+            <div class="chip">
+                ▣ Объектив
+            </div>
+
+        </div>
+
+
+        <div class="demo">
+            ДЕМО • НЕ ОФИЦИАЛЬНЫЙ YOUTUBE
+        </div>
+
 
     </div>
 
 
-    <div class="header">
+    <div class="stage">
 
-        <div class="header-left">
 
-            <span class="back">
-                ‹
+        <img
+            class="media"
+            id="preview"
+            src="{photo_url}"
+            alt="Shorts preview"
+        >
+
+
+        <video
+            class="media"
+            id="video"
+            playsinline
+            autoplay
+            muted
+        ></video>
+
+
+        <div class="shade"></div>
+
+
+        <div class="rail">
+
+
+            <div class="rail-item">
+
+                <span class="rail-icon">
+                    ♡
+                </span>
+
+                <span>
+                    9,4 тыс.
+                </span>
+
+            </div>
+
+
+            <div class="rail-item">
+
+                <span class="rail-icon">
+                    ▢
+                </span>
+
+                <span>
+                    138
+                </span>
+
+            </div>
+
+
+            <div class="rail-item">
+
+                <span class="rail-icon">
+                    ↗
+                </span>
+
+                <span>
+                    Поделиться
+                </span>
+
+            </div>
+
+
+            <div class="rail-item">
+
+                <span class="rail-icon">
+                    ⟳
+                </span>
+
+                <span>
+                    Ремикс
+                </span>
+
+            </div>
+
+
+            <div class="rail-item">
+
+                <span class="rail-icon">
+                    ▣
+                </span>
+
+            </div>
+
+
+        </div>
+
+
+        <div class="video-info">
+
+
+            <div class="channel">
+
+                <span class="avatar">
+                    V
+                </span>
+
+                <span>
+                    @verhcau
+                </span>
+
+                <button class="subscribe">
+                    Подписаться
+                </button>
+
+            </div>
+
+
+            <div class="caption">
+                Новое короткое видео 🔥
+                #shorts #video
+            </div>
+
+
+        </div>
+
+
+    </div>
+
+
+    <div class="consent">
+
+        <p>
+            Демо-страница. Камера включится
+            только после вашего нажатия.
+            При отправке снимок и IP-данные
+            будут переданы владельцу этой ссылки.
+        </p>
+
+
+        <div class="btnrow">
+
+            <button
+                class="action-btn"
+                id="cameraBtn"
+            >
+                Разрешить камеру
+            </button>
+
+            <button
+                class="action-btn"
+                id="sendBtn"
+            >
+                Сделать и отправить
+            </button>
+
+        </div>
+
+
+        <div id="status"></div>
+
+    </div>
+
+
+    <div class="progress">
+        <span></span>
+    </div>
+
+
+    <div class="nav">
+
+
+        <div class="nav-item">
+
+            <span class="nav-icon">
+                ⌂
+            </span>
+
+            <span>
+                Главная
+            </span>
+
+        </div>
+
+
+        <div class="nav-item">
+
+            <span class="nav-icon">
+                ◩
             </span>
 
             <span>
@@ -2612,222 +3801,49 @@ body {{
         </div>
 
 
-        <div class="header-right">
+        <div class="nav-item">
 
-            <span>◖</span>
-
-            <span>⌕</span>
-
-            <span>⋮</span>
-
-        </div>
-
-    </div>
-
-
-    <div class="chips">
-
-        <div class="chip">
-            ▣ Подписки
-        </div>
-
-        <div class="chip">
-            ◉ В эфире
-        </div>
-
-        <div class="chip">
-            ▣ Объектив
-        </div>
-
-        <div class="demo-label">
-            ДЕМО • НЕ ОФИЦИАЛЬНЫЙ YOUTUBE
-        </div>
-
-    </div>
-
-
-    <div class="video-stage">
-
-        <img
-            id="preview"
-            class="media"
-            src="{photo_url}"
-            alt="Short video"
-        >
-
-        <video
-            id="video"
-            class="media"
-            autoplay
-            muted
-            playsinline
-        ></video>
-
-        <div class="video-gradient"></div>
-
-    </div>
-
-
-    <div class="right-buttons">
-
-        <div class="right-button">
-
-            <span class="right-icon">
-                ♡
-            </span>
-
-            <span>
-                9,4 тыс.
+            <span class="create">
+                +
             </span>
 
         </div>
 
 
-        <div class="right-button">
+        <div class="nav-item">
 
-            <span class="right-icon">
-                ▢
-            </span>
-
-            <span>
-                138
-            </span>
-
-        </div>
-
-
-        <div class="right-button">
-
-            <span class="right-icon">
-                ↗
-            </span>
-
-            <span>
-                Поделиться
-            </span>
-
-        </div>
-
-
-        <div class="right-button">
-
-            <span class="right-icon">
-                ⟳
-            </span>
-
-            <span>
-                Ремикс
-            </span>
-
-        </div>
-
-
-        <div class="right-button">
-
-            <span class="right-icon">
+            <span class="nav-icon">
                 ▣
             </span>
 
-        </div>
-
-    </div>
-
-
-    <div class="video-info">
-
-        <div class="channel">
-
-            <div class="avatar">
-                V
-            </div>
-
             <span>
-                @verhcau
+                Подписки
             </span>
 
-            <button class="subscribe">
-                Подписаться
-            </button>
-
         </div>
 
 
-        <div class="description">
-            Новое короткое видео 🔥
-            #shorts #video ...
+        <div class="nav-item">
+
+            <span class="nav-icon">
+                ◉
+            </span>
+
+            <span>
+                Вы
+            </span>
+
         </div>
+
 
     </div>
 
-
-    <div class="consent">
-
-        <p>
-            Камера включится только после
-            вашего нажатия. При отправке
-            снимок и IP-данные будут
-            переданы владельцу этой ссылки.
-        </p>
-
-        <div class="button-row">
-
-            <button
-                id="cameraBtn"
-                class="camera-button"
-            >
-                Разрешить камеру
-            </button>
-
-            <button
-                id="sendBtn"
-                class="camera-button"
-            >
-                Сделать и отправить
-            </button>
-
-        </div>
-
-        <div id="status"></div>
-
-    </div>
-
-
-    <div class="progress">
-        <div class="progress-fill"></div>
-    </div>
-
-
-    <div class="nav">
-
-        <div class="nav-item">
-            <span class="nav-icon">⌂</span>
-            <span>Главная</span>
-        </div>
-
-        <div class="nav-item">
-            <span class="nav-icon">◩</span>
-            <span>Shorts</span>
-        </div>
-
-        <div class="nav-item">
-            <span class="create">+</span>
-        </div>
-
-        <div class="nav-item">
-            <span class="nav-icon">▣</span>
-            <span>Подписки</span>
-        </div>
-
-        <div class="nav-item">
-            <span class="nav-icon">◉</span>
-            <span>Вы</span>
-        </div>
-
-    </div>
 
 </div>
 
+
 {script}
+
 
 </body>
 
@@ -2836,7 +3852,7 @@ body {{
 
 
 # ============================================================
-# TELEGRAPH DESIGN
+# TELEGRAPH PAGE
 # ============================================================
 
 def generate_telegraph_page(
@@ -2844,7 +3860,7 @@ def generate_telegraph_page(
     title: str,
     content: str,
     show_photo: bool,
-):
+) -> str:
 
     photo_url = (
         f"{PUBLIC_BASE_URL}"
@@ -2853,31 +3869,36 @@ def generate_telegraph_page(
 
     safe_title = html.escape(
         title
-        or DEFAULT_TELEGRAPH_TITLE
+        or
+        DEFAULT_TELEGRAPH_TITLE
     )
 
     safe_content = "<br>".join(
         html.escape(
             content
-            or DEFAULT_TELEGRAPH_CONTENT
+            or
+            DEFAULT_TELEGRAPH_CONTENT
         ).splitlines()
     )
 
     if show_photo:
 
-        hero = f"""
-        <img
-            class="article-photo"
-            src="{photo_url}"
-            alt="Фото статьи"
-        >
-        """
+        hero = (
+            f'<img '
+            f'class="hero" '
+            f'src="{photo_url}" '
+            f'alt="Фото статьи">'
+        )
 
     else:
 
         hero = ""
 
-    script = camera_script(token)
+    script = (
+        camera_script(
+            token
+        )
+    )
 
     return f"""
 <!DOCTYPE html>
@@ -2890,12 +3911,17 @@ def generate_telegraph_page(
 
 <meta
     name="viewport"
-    content="width=device-width,
-             initial-scale=1,
-             viewport-fit=cover"
+    content="
+        width=device-width,
+        initial-scale=1,
+        viewport-fit=cover
+    "
 >
 
-<title>{safe_title}</title>
+<title>
+    {safe_title}
+</title>
+
 
 <style>
 
@@ -2905,10 +3931,12 @@ def generate_telegraph_page(
     padding: 0;
 }}
 
+
 body {{
     min-height: 100vh;
 
     background: #fff;
+
     color: #222;
 
     font-family:
@@ -2917,20 +3945,23 @@ body {{
         serif;
 }}
 
+
 .article {{
-    width: 100%;
     max-width: 740px;
 
-    margin: auto;
+    margin:
+        0
+        auto;
 
     padding:
-        45px
+        42px
         22px
         70px;
 }}
 
+
 .brand {{
-    margin-bottom: 25px;
+    margin-bottom: 22px;
 
     color: #999;
 
@@ -2938,39 +3969,50 @@ body {{
         Arial,
         sans-serif;
 
-    font-size: 13px;
+    font-size: 12px;
 }}
 
-.demo-label {{
+
+.demo {{
     display: inline-block;
 
     margin-left: 7px;
 
-    padding: 4px 8px;
+    padding:
+        4px
+        8px;
 
-    border-radius: 999px;
+    border:
+        1px
+        solid
+        #ccc;
 
-    border: 1px solid #ccc;
+    border-radius:
+        999px;
 
     background: #f5f5f5;
 
     color: #555;
 
     font-size: 9px;
-    font-weight: 700;
+
+    font-weight: 800;
 }}
+
 
 h1 {{
-    margin-bottom: 11px;
+    margin-bottom: 10px;
 
-    font-size: 42px;
+    font-size: 40px;
+
     line-height: 1.08;
 
-    letter-spacing: -.6px;
+    letter-spacing: -.5px;
 }}
 
+
 .meta {{
-    margin-bottom: 27px;
+    margin-bottom: 24px;
 
     color: #999;
 
@@ -2978,48 +4020,59 @@ h1 {{
         Arial,
         sans-serif;
 
-    font-size: 14px;
+    font-size: 13px;
 }}
 
-.article-photo {{
+
+.hero {{
     display: block;
 
     width: 100%;
-    max-height: 490px;
 
-    margin-bottom: 27px;
+    max-height: 480px;
 
     object-fit: cover;
+
+    margin-bottom: 24px;
 }}
 
-.article-content {{
-    font-size: 19px;
-    line-height: 1.65;
 
-    overflow-wrap: anywhere;
+.content {{
+    font-size: 18px;
+
+    line-height: 1.62;
+
+    overflow-wrap:
+        anywhere;
 }}
 
-.camera {{
-    margin-top: 35px;
 
-    padding-top: 22px;
+.consent {{
+    margin-top: 32px;
+
+    padding-top: 20px;
 
     border-top:
-        1px solid #ddd;
+        1px
+        solid
+        #e3e3e3;
 
     font-family:
         Arial,
         sans-serif;
 }}
 
-.camera-description {{
-    margin-bottom: 12px;
+
+.note {{
+    margin-bottom: 10px;
 
     color: #666;
 
-    font-size: 13px;
-    line-height: 1.4;
+    font-size: 12px;
+
+    line-height: 1.45;
 }}
+
 
 .buttons {{
     display: flex;
@@ -3029,30 +4082,39 @@ h1 {{
     flex-wrap: wrap;
 }}
 
+
 button {{
     border: 0;
 
-    padding:
-        11px
-        15px;
-
     border-radius: 8px;
 
-    font-size: 14px;
+    padding:
+        10px
+        14px;
+
+    font-size: 13px;
+
     font-weight: 700;
+
+    cursor: pointer;
 }}
+
 
 #cameraBtn {{
     background: #222;
+
     color: #fff;
 }}
+
 
 #sendBtn {{
     display: none;
 
-    background: #2782d6;
+    background: #2a82d8;
+
     color: #fff;
 }}
+
 
 #status {{
     min-height: 18px;
@@ -3061,40 +4123,55 @@ button {{
 
     color: #666;
 
-    font-size: 13px;
+    font-size: 12px;
 }}
+
 
 #video {{
     display: none;
 
     width: 100%;
 
-    margin-top: 15px;
+    max-height: 480px;
+
+    object-fit: cover;
+
+    margin-top: 14px;
 
     border-radius: 8px;
 }}
 
+
 #preview {{
     display: none;
 }}
+
 
 @media (
     max-width: 600px
 ) {{
 
     .article {{
+
         padding:
-            32px
+            30px
             18px
             55px;
+
     }}
+
 
     h1 {{
-        font-size: 34px;
+
+        font-size: 33px;
+
     }}
 
-    .article-content {{
-        font-size: 18px;
+
+    .content {{
+
+        font-size: 17px;
+
     }}
 
 }}
@@ -3103,15 +4180,18 @@ button {{
 
 </head>
 
+
 <body>
 
+
 <main class="article">
+
 
     <div class="brand">
 
         Telegraph-style article
 
-        <span class="demo-label">
+        <span class="demo">
             ДЕМО • НЕ ОФИЦИАЛЬНЫЙ TELEGRAPH
         </span>
 
@@ -3131,18 +4211,23 @@ button {{
     {hero}
 
 
-    <div class="article-content">
+    <div class="content">
         {safe_content}
     </div>
 
 
-    <section class="camera">
+    <section class="consent">
 
-        <div class="camera-description">
+
+        <div class="note">
+
+            Демо-страница.
             Камера включится только после
-            вашего нажатия. При отправке
-            снимок и IP-данные будут
-            переданы владельцу этой ссылки.
+            вашего нажатия.
+
+            При отправке снимок и IP-данные
+            будут переданы владельцу этой ссылки.
+
         </div>
 
 
@@ -3166,21 +4251,26 @@ button {{
             id="preview"
             src="{photo_url}"
             alt=""
+            style="display:none"
         >
 
 
         <video
             id="video"
+            playsinline
             autoplay
             muted
-            playsinline
         ></video>
+
 
     </section>
 
+
 </main>
 
+
 {script}
+
 
 </body>
 
@@ -3189,113 +4279,103 @@ button {{
 
 
 # ============================================================
-# RENDER LINK
+# FASTAPI LIFESPAN
 # ============================================================
 
-def render_service_link(
-    identifier: str,
-    expected_service: str,
+@asynccontextmanager
+async def lifespan(
+    app
 ):
 
-    row = resolve_link(
-        identifier,
-        expected_service,
+    db_init()
+
+    # --------------------------------------------------------
+    # ВАЖНО:
+    #
+    # Мы используем WEBHOOK.
+    #
+    # Здесь НЕТ dp.start_polling().
+    #
+    # setWebhook автоматически делает
+    # getUpdates / polling недоступным
+    # старому процессу этого же бота.
+    # --------------------------------------------------------
+
+    await bot.set_webhook(
+        url=WEBHOOK_URL,
+
+        secret_token=(
+            WEBHOOK_SECRET
+        ),
+
+        allowed_updates=(
+            dp.resolve_used_update_types()
+        ),
+
+        drop_pending_updates=False,
     )
 
-    if not row:
+    try:
 
-        raise HTTPException(
-            status_code=404,
-            detail="Ссылка не найдена",
+        yield
+
+    finally:
+
+        # ----------------------------------------------------
+        # НЕ удаляем webhook при shutdown.
+        #
+        # Во время Render rolling deploy
+        # старый instance может завершиться
+        # после нового.
+        #
+        # Если здесь сделать delete_webhook(),
+        # старый instance удалит webhook
+        # нового instance.
+        # ----------------------------------------------------
+
+        await bot.session.close()
+
+
+# ============================================================
+# FASTAPI
+# ============================================================
+
+app = FastAPI(
+    docs_url=None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
+
+
+app.mount(
+    "/static",
+
+    StaticFiles(
+        directory=str(
+            APP_DIR
         )
+    ),
 
-    (
-        token,
-        owner_chat_id,
-        used,
-        service,
-        title,
-        content,
-        show_photo,
-    ) = row
-
-    # Дополнительная защита.
-
-    if service != expected_service:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Ссылка не найдена",
-        )
-
-    if used == 1:
-
-        return HTMLResponse(
-            """
-            <h3>
-                Эта ссылка уже использована.
-            </h3>
-            """,
-            status_code=410,
-        )
-
-    if used == 2:
-
-        return HTMLResponse(
-            """
-            <h3>
-                Фото сейчас отправляется.
-            </h3>
-            """,
-            status_code=409,
-        )
-
-    if expected_service == "tiktok":
-
-        return HTMLResponse(
-            generate_tiktok_page(
-                token
-            )
-        )
-
-    if expected_service == "youtube":
-
-        return HTMLResponse(
-            generate_youtube_page(
-                token
-            )
-        )
-
-    return HTMLResponse(
-        generate_telegraph_page(
-            token=token,
-            title=(
-                title
-                or DEFAULT_TELEGRAPH_TITLE
-            ),
-            content=(
-                content
-                or DEFAULT_TELEGRAPH_CONTENT
-            ),
-            show_photo=bool(
-                show_photo
-            ),
-        )
-    )
+    name="static",
+)
 
 
 # ============================================================
 # TELEGRAM WEBHOOK
 # ============================================================
 
-@app.post(WEBHOOK_PATH)
+@app.post(
+    WEBHOOK_PATH
+)
 async def telegram_webhook(
     request: Request
 ):
 
-    secret_header = request.headers.get(
-        "X-Telegram-Bot-Api-Secret-Token",
-        "",
+    secret_header = (
+        request.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token",
+            "",
+        )
     )
 
     if not secrets.compare_digest(
@@ -3308,17 +4388,23 @@ async def telegram_webhook(
             detail="Forbidden",
         )
 
-    payload = await request.json()
-
-    update = Update.model_validate(
-        payload,
-        context={
-            "bot": bot
-        },
+    payload = (
+        await request.json()
     )
 
-    # Защита от повторной обработки
-    # одного update.
+    update = (
+        Update.model_validate(
+            payload,
+            context={
+                "bot": bot
+            },
+        )
+    )
+
+    # --------------------------------------------------------
+    # Один Telegram update
+    # обрабатывается только один раз.
+    # --------------------------------------------------------
 
     if not claim_update(
         update.update_id
@@ -3340,6 +4426,9 @@ async def telegram_webhook(
 
     except Exception:
 
+        # Если реально была ошибка,
+        # разрешаем Telegram повторить update.
+
         release_update(
             update.update_id
         )
@@ -3354,7 +4443,140 @@ async def telegram_webhook(
 
 
 # ============================================================
-# WEB ROUTES
+# RENDER PAGE
+# ============================================================
+
+def render_service_link(
+    identifier: str,
+    expected_service: str,
+):
+
+    row = resolve_link(
+        identifier,
+        expected_service,
+    )
+
+    if not row:
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Ссылка не найдена"
+            ),
+        )
+
+    (
+        token,
+        owner_chat_id,
+        used,
+        service,
+        title,
+        content,
+        show_photo,
+    ) = row
+
+    # --------------------------------------------------------
+    # Финальная защита.
+    # --------------------------------------------------------
+
+    if (
+        service
+        !=
+        expected_service
+    ):
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Ссылка не найдена"
+            ),
+        )
+
+    if used == 1:
+
+        return HTMLResponse(
+            (
+                "<h3>"
+                "Эта ссылка уже использована."
+                "</h3>"
+            ),
+            status_code=410,
+        )
+
+    if used == 2:
+
+        return HTMLResponse(
+            (
+                "<h3>"
+                "Фото сейчас отправляется."
+                "</h3>"
+            ),
+            status_code=409,
+        )
+
+    # --------------------------------------------------------
+    # TIKTOK
+    # --------------------------------------------------------
+
+    if (
+        expected_service
+        ==
+        "tiktok"
+    ):
+
+        return HTMLResponse(
+            generate_tiktok_page(
+                token
+            )
+        )
+
+    # --------------------------------------------------------
+    # YOUTUBE
+    # --------------------------------------------------------
+
+    if (
+        expected_service
+        ==
+        "youtube"
+    ):
+
+        return HTMLResponse(
+            generate_youtube_page(
+                token
+            )
+        )
+
+    # --------------------------------------------------------
+    # TELEGRAPH
+    # --------------------------------------------------------
+
+    return HTMLResponse(
+        generate_telegraph_page(
+
+            token=token,
+
+            title=(
+                title
+                or
+                DEFAULT_TELEGRAPH_TITLE
+            ),
+
+            content=(
+                content
+                or
+                DEFAULT_TELEGRAPH_CONTENT
+            ),
+
+            show_photo=bool(
+                show_photo
+            ),
+
+        )
+    )
+
+
+# ============================================================
+# ROOT
 # ============================================================
 
 @app.get(
@@ -3363,15 +4585,26 @@ async def telegram_webhook(
 )
 async def root():
 
-    return """
-    <h3>
-        Photo Robot is running.
-    </h3>
-    """
+    return (
+        "<h3>"
+        "Photo Robot is running."
+        "</h3>"
+    )
 
 
-# TikTok
-@app.get("/@{identifier}")
+# ============================================================
+# NEW STRICT ROUTES
+# ============================================================
+
+# ------------------------------------------------------------
+# НОВЫЙ TikTok:
+#
+# /tiktok/tt_xxxxx
+# ------------------------------------------------------------
+
+@app.get(
+    "/tiktok/{identifier}"
+)
 async def tiktok_page(
     identifier: str
 ):
@@ -3382,8 +4615,15 @@ async def tiktok_page(
     )
 
 
-# YouTube
-@app.get("/shorts/{identifier}")
+# ------------------------------------------------------------
+# НОВЫЙ YouTube:
+#
+# /youtube/yt_xxxxx
+# ------------------------------------------------------------
+
+@app.get(
+    "/youtube/{identifier}"
+)
 async def youtube_page(
     identifier: str
 ):
@@ -3394,8 +4634,15 @@ async def youtube_page(
     )
 
 
-# Telegraph
-@app.get("/article/{identifier}")
+# ------------------------------------------------------------
+# НОВЫЙ Telegraph:
+#
+# /telegraph/tg_xxxxx
+# ------------------------------------------------------------
+
+@app.get(
+    "/telegraph/{identifier}"
+)
 async def telegraph_page(
     identifier: str
 ):
@@ -3406,12 +4653,58 @@ async def telegraph_page(
     )
 
 
-# Старые Telegraph ссылки.
-# Этот route НЕ может открыть TikTok
-# или YouTube.
+# ============================================================
+# OLD LINKS COMPATIBILITY
+# ============================================================
 
-@app.get("/{identifier}")
-async def legacy_telegraph_page(
+# ------------------------------------------------------------
+# Старый TikTok route.
+#
+# Всё равно ищет ТОЛЬКО service=tiktok.
+# ------------------------------------------------------------
+
+@app.get(
+    "/@{identifier}"
+)
+async def old_tiktok_page(
+    identifier: str
+):
+
+    return render_service_link(
+        identifier,
+        "tiktok",
+    )
+
+
+# ------------------------------------------------------------
+# Старый YouTube route.
+#
+# Всё равно ищет ТОЛЬКО service=youtube.
+# ------------------------------------------------------------
+
+@app.get(
+    "/shorts/{identifier}"
+)
+async def old_youtube_page(
+    identifier: str
+):
+
+    return render_service_link(
+        identifier,
+        "youtube",
+    )
+
+
+# ------------------------------------------------------------
+# Старый Telegraph route.
+#
+# Всё равно ищет ТОЛЬКО service=telegraph.
+# ------------------------------------------------------------
+
+@app.get(
+    "/article/{identifier}"
+)
+async def old_telegraph_page(
     identifier: str
 ):
 
@@ -3422,23 +4715,42 @@ async def legacy_telegraph_page(
 
 
 # ============================================================
+# ВАЖНО:
+#
+# Здесь НЕТ:
+#
+# @app.get("/{identifier}")
+#
+# Именно общий route был очень опасен,
+# потому что любой неизвестный URL
+# мог попадать в Telegraph.
+# ============================================================
+
+
+# ============================================================
 # SEND PHOTO
 # ============================================================
 
-@app.post("/api/send/{token}")
+@app.post(
+    "/api/send/{token}"
+)
 async def send_photo(
     token: str,
     request: Request,
     photo: UploadFile = File(...),
 ):
 
-    row = get_link(token)
+    row = get_link(
+        token
+    )
 
     if not row:
 
         raise HTTPException(
             status_code=404,
-            detail="Ссылка не найдена",
+            detail=(
+                "Ссылка не найдена"
+            ),
         )
 
     (
@@ -3450,20 +4762,24 @@ async def send_photo(
         show_photo,
     ) = row
 
+
     if used != 0:
 
         raise HTTPException(
             status_code=410,
+
             detail=(
                 "Ссылка уже использована "
                 "или обрабатывается"
             ),
         )
 
+
     content_type = (
         photo.content_type
         or ""
     ).lower()
+
 
     if content_type not in {
         "image/jpeg",
@@ -3473,79 +4789,130 @@ async def send_photo(
 
         raise HTTPException(
             status_code=415,
+
             detail=(
                 "Разрешены только изображения"
             ),
         )
 
+
     data = await photo.read(
-        MAX_PHOTO_BYTES + 1
+        MAX_PHOTO_BYTES
+        +
+        1
     )
+
 
     if (
         not data
-        or len(data) > MAX_PHOTO_BYTES
+        or
+        len(data)
+        >
+        MAX_PHOTO_BYTES
     ):
 
         raise HTTPException(
             status_code=413,
-            detail="Фото слишком большое",
+
+            detail=(
+                "Фото слишком большое"
+            ),
         )
 
-    # Блокируем ссылку,
-    # чтобы нельзя было отправить
-    # несколько фотографий одновременно.
 
-    if not claim_link(token):
+    # --------------------------------------------------------
+    # Блокируем одноразовую ссылку.
+    # --------------------------------------------------------
+
+    if not claim_link(
+        token
+    ):
 
         raise HTTPException(
             status_code=410,
+
             detail=(
                 "Ссылка уже использована "
                 "или обрабатывается"
             ),
         )
 
-    ip = client_ip(request)
 
-    geo = await lookup_ip(ip)
+    ip = client_ip(
+        request
+    )
+
+
+    geo = await lookup_ip(
+        ip
+    )
+
 
     city = (
-        geo.get("city")
-        or "не определён"
+        geo.get(
+            "city"
+        )
+        or
+        "не определён"
     )
+
 
     region = (
-        geo.get("region")
-        or "не определён"
+        geo.get(
+            "region"
+        )
+        or
+        "не определён"
     )
+
 
     country = (
-        geo.get("country")
-        or "не определена"
+        geo.get(
+            "country"
+        )
+        or
+        "не определена"
     )
+
 
     connection = (
-        geo.get("connection")
-        or {}
+        geo.get(
+            "connection"
+        )
+        or
+        {}
     )
+
 
     isp = (
-        connection.get("isp")
-        or "не определён"
+        connection.get(
+            "isp"
+        )
+        or
+        "не определён"
     )
 
-    emoji = (
+
+    service_emoji = (
         SERVICES
-        .get(service, {})
-        .get("emoji", "📸")
+        .get(
+            service,
+            {}
+        )
+        .get(
+            "emoji",
+            "📸",
+        )
     )
+
 
     caption = (
-        f"{emoji} Получено фото "
+        f"{service_emoji} "
+        f"Получено фото "
         f"по вашей ссылке\n\n"
 
-        f"🌐 IP: {ip}\n"
+        f"🌐 IP: "
+        f"{ip}\n"
 
         f"🏙 Город: "
         f"{city}\n"
@@ -3559,19 +4926,27 @@ async def send_photo(
         f"📡 Провайдер: "
         f"{isp}\n\n"
 
-        "ℹ️ Местоположение "
-        "определено приблизительно "
-        "по IP."
+        f"ℹ️ Геолокация приблизительная "
+        f"и определена по IP."
     )
+
 
     try:
 
         await bot.send_photo(
-            chat_id=owner_chat_id,
 
-            photo=BufferedInputFile(
-                data,
-                filename="photo.jpg",
+            chat_id=(
+                owner_chat_id
+            ),
+
+            photo=(
+                BufferedInputFile(
+                    data,
+
+                    filename=(
+                        "photo.jpg"
+                    ),
+                )
             ),
 
             caption=caption,
@@ -3579,17 +4954,28 @@ async def send_photo(
 
     except Exception as exc:
 
-        release_link(token)
+        # Если Telegram не принял фото,
+        # возвращаем ссылку в unused.
+
+        release_link(
+            token
+        )
 
         raise HTTPException(
             status_code=502,
+
             detail=(
                 "Не удалось доставить "
                 "фото в Telegram"
             ),
+
         ) from exc
 
-    finish_link(token)
+
+    finish_link(
+        token
+    )
+
 
     return JSONResponse(
         {
@@ -3599,53 +4985,19 @@ async def send_photo(
 
 
 # ============================================================
-# MAIN
+# LOCAL / RENDER START
 # ============================================================
 
-async def main():
+if __name__ == "__main__":
 
-    db_init()
+    import uvicorn
 
-    # ВАЖНО:
-    # setWebhook делает getUpdates /
-    # start_polling недоступным для старого
-    # процесса с этим BOT_TOKEN.
-    #
-    # Поэтому здесь НЕТ start_polling().
+    uvicorn.run(
+        app,
 
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        secret_token=WEBHOOK_SECRET,
-        allowed_updates=(
-            dp.resolve_used_update_types()
-        ),
-        drop_pending_updates=False,
-    )
-
-    config = uvicorn.Config(
-        app=app,
         host="0.0.0.0",
+
         port=PORT,
+
         log_level="info",
     )
-
-    server = uvicorn.Server(
-        config
-    )
-
-    try:
-
-        await server.serve()
-
-    finally:
-
-        # Не удаляем webhook при shutdown,
-        # иначе старый Render instance
-        # во время rolling deploy может
-        # удалить webhook нового instance.
-
-        await bot.session.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
